@@ -105,9 +105,15 @@ function spark(canvas, run, map, t, color) {
   let max = 0;
   for (const v of map.values()) if (v != null) max = Math.max(max, v);
   max = max || 1;
-  const X = (s) => (s / Math.max(1, run.maxT)) * W, Y = (v) => H - 2 - (v / max) * (H - 4);
+  // the canvas covers the whole tile: the job band spans its full height, the
+  // line lives in the bottom 24 px
+  const LH = 22;
+  const X = (s) => (s / Math.max(1, run.maxT)) * W, Y = (v) => H - 3 - (v / max) * LH;
   const w = run.batch_window;
-  if (w) { c.fillStyle = "rgba(251,146,60,.08)"; c.fillRect(X(w.start_s), 0, Math.max(1, X(Math.min(w.end_s, run.maxT)) - X(w.start_s)), H); }
+  // a very faint full-height band for the job, and a baseline across the
+  // whole run so the x-axis reads as "the run", drawn up to now
+  if (w) { c.fillStyle = "rgba(251,146,60,.055)"; c.fillRect(X(w.start_s), 0, Math.max(1, X(Math.min(w.end_s, run.maxT)) - X(w.start_s)), H); }
+  c.fillStyle = "rgba(148,163,184,.14)"; c.fillRect(0, H - 2, W, 1);
   canvas.classList.add("drawn");
   c.strokeStyle = color; c.lineWidth = 1.5; c.beginPath();
   let started = false;
@@ -139,11 +145,11 @@ function paintMetrics(t) {
   }
   if (r) drawStrip($("#strip"), r, t);
   $("#scrub").value = String(t);
-  $("#clock").textContent = r ? `${t} / ${r.maxT} s` : "0 s";
+  // time and job state live in the panel header, so nothing sits on the 3D labels
   const w = r?.batch_window;
   const job = r?.job || "job";
-  const state = !r ? "" : !w ? "no job in this round" : t < w.start_s ? `${job} starts at ${Math.round(w.start_s)} s` : t < w.end_s ? `<span class="jb">${job} running · ${Math.round(t - w.start_s)} s</span>` : `${job} committed at ${Math.round(w.end_s)} s`;
-  $("#hud").innerHTML = r ? `<b>t = ${t} s</b> · ${state}` : "no run loaded";
+  const state = !r ? "" : !w ? "no job" : t < w.start_s ? `${job} at ${Math.round(w.start_s)} s` : t < w.end_s ? `<span class="jb">${job} running ${Math.round(t - w.start_s)} s</span>` : `${job} done at ${Math.round(w.end_s)} s`;
+  $("#clock").innerHTML = r ? `${state} · <b>${t}</b>/${r.maxT} s` : "0 s";
 }
 new ResizeObserver(() => { if (player.run) paintMetrics(Math.floor(player.t)); }).observe($("#metrics-panel"));
 
@@ -341,8 +347,13 @@ function renderObjectives() {
   }).join("");
   for (const b of $$("#obj-list .cmd")) b.addEventListener("click", () => term.exec(b.dataset.cmd));
   for (const b of $$("#obj-list .opt:not(:disabled)")) b.addEventListener("click", () => answer(b.dataset.o, Number(b.dataset.i), b));
-  const curEl = $("#obj-list .obj.current");
-  if (curEl) curEl.scrollIntoView({ block: "nearest", behavior: reduceMotion ? "auto" : "smooth" });
+  // keep the current objective at the top of the list, with a sliver of the
+  // last finished one above it; scroll only the list, never the page
+  const list = $("#obj-list"), curEl = $("#obj-list .obj.current");
+  if (curEl) requestAnimationFrame(() => {
+    const top = list.scrollTop + curEl.getBoundingClientRect().top - list.getBoundingClientRect().top - 14;
+    list.scrollTo({ top: Math.max(0, top), behavior: reduceMotion ? "auto" : "smooth" });
+  });
 }
 
 function answer(oid, i, btn) {

@@ -130,14 +130,21 @@ export function drawStrip(canvas, run, t) {
   if (!run || !run.maxT) return;
   const X = (s) => (s / run.maxT) * W;
   const w = run.batch_window;
-  if (w) { ctx.fillStyle = "rgba(251,146,60,.22)"; ctx.fillRect(X(w.start_s), 4, X(Math.min(w.end_s, run.maxT)) - X(w.start_s), H - 8); }
+  // the part not yet played is dimmed, so the runs future doesnt give it away
+  const fut = (s) => (s > t ? 0.25 : 1);
+  if (w) {
+    ctx.fillStyle = "rgba(251,146,60,.22)";
+    const a = X(w.start_s), z = X(Math.min(w.end_s, run.maxT)), c = Math.max(a, Math.min(z, X(t)));
+    ctx.fillRect(a, 4, c - a, H - 8);
+    ctx.globalAlpha = 0.25; ctx.fillRect(c, 4, z - c, H - 8); ctx.globalAlpha = 1;
+  }
   const bw = Math.max(1, W / (run.maxT + 1));
   for (const f of run.frames) {
     const tt = totals(f);
     if (!tt.n) continue;
     const bad = 1 - tt.ok / tt.n;
     ctx.fillStyle = bad > 0.01 ? css("--vp-bad") : css("--vp-ok");
-    ctx.globalAlpha = bad > 0.01 ? 0.35 + 0.65 * bad : 0.35;
+    ctx.globalAlpha = (bad > 0.01 ? 0.35 + 0.65 * bad : 0.35) * fut(f.t);
     const h = 6 + (H - 16) * (bad > 0.01 ? bad : 0.25);
     ctx.fillRect(X(f.t) - bw / 2, H - 4 - h, bw, h);
   }

@@ -133,11 +133,13 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
   const P = Array.from({ length: PARTICLES }, () => ({ alive: false }));
   const dummy = new THREE.Object3D();
 
-  const mk = () => { const d = document.createElement("div"); d.className = "lbl"; labelsEl.appendChild(d); return d; };
-  const L = { clients: mk(), api: mk(), pool: mk(), bouncer: mk(), pg: mk(), job: mk() };
+  // Labels alternate above and below the pipeline so neighbours never collide
+  // in a narrow panel; data-k lets CSS hang the "below" ones from their anchor.
+  const mk = (k) => { const d = document.createElement("div"); d.className = "lbl"; d.dataset.k = k; labelsEl.appendChild(d); return d; };
+  const L = { clients: mk("clients"), api: mk("api"), pool: mk("pool"), bouncer: mk("bouncer"), pg: mk("pg"), job: mk("job") };
   const anchors = {
-    clients: new THREE.Vector3(X.clients, 1.25, 0), api: new THREE.Vector3(X.api, 1.3, 0), pool: new THREE.Vector3(X.pool, 1.3, 0),
-    bouncer: new THREE.Vector3(X.bouncer - 0.2, 1.6, 0), pg: new THREE.Vector3(X.pg, 1.5, 0), job: new THREE.Vector3(X.pg, 3.3, 0),
+    clients: new THREE.Vector3(X.clients, 1.25, 0), api: new THREE.Vector3(X.api, -1.35, 0), pool: new THREE.Vector3(X.pool, 1.3, 0),
+    bouncer: new THREE.Vector3(X.bouncer - 0.2, -1.35, 0), pg: new THREE.Vector3(X.pg, 1.5, 0), job: new THREE.Vector3((X.bouncer + X.pg) / 2, 2.7, 0),
   };
 
   // Fit the camera so the whole pipeline fills the frame at any aspect ratio.
@@ -211,8 +213,11 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
     L.bouncer.classList.toggle("hot", waiting > 0);
     L.pg.innerHTML = `PostgreSQL 17<small>${db.pg_total ?? "–"} sessions${wb ? ` · ${wb} on locks` : ""}</small>`;
     L.pg.classList.toggle("hot", wb > 0);
-    L.job.innerHTML = inJob ? `${jobName} transaction<small>open ${Math.round(t - w.start_s)} s</small>` : "";
-    L.job.style.display = inJob ? "" : "none";
+    // the job's state rides on the PostgreSQL label: a separate floating
+    // label collided with it in short panels
+    if (inJob) L.pg.innerHTML += `<small class="jobline">${jobName} open ${Math.round(t - w.start_s)} s</small>`;
+    L.job.innerHTML = "";
+    L.job.style.display = "none";
     L.job.classList.add("job");
     if (reduceMotion) render();
   }
@@ -265,8 +270,14 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     for (const [k, a] of Object.entries(anchors)) {
       v.copy(a).project(camera);
-      L[k].style.left = `${((v.x + 1) / 2) * w}px`;
-      L[k].style.top = `${((1 - v.y) / 2) * h}px`;
+      // keep every label fully inside the canvas: "above" labels hang up from
+      // their anchor, "below" ones (api, bouncer) hang down
+      const el = L[k], ow = el.offsetWidth, oh = el.offsetHeight, below = k === "api" || k === "bouncer";
+      const x = Math.max(ow / 2 + 4, Math.min(w - ow / 2 - 4, ((v.x + 1) / 2) * w));
+      const y0 = ((1 - v.y) / 2) * h;
+      const y = below ? Math.min(h - oh - 4, y0) : Math.max(oh + 4, y0);
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
     }
   }
   // A lost or broken WebGL context makes three.js throw while rendering;

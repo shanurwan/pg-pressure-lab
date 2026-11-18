@@ -84,7 +84,11 @@ export function createTerminal(root, api) {
       const db = r.byT.get(s)?.db || {};
       const pct = n ? (ok / n) * 100 : 100;
       const e = Object.entries(errs).map(([c, v]) => `${c}:${v}`).join(" ");
-      line(`<span class="c">t=${String(s).padStart(3)}s</span>  <span class="${pct < 99 ? "bad" : "ok"}">${pct.toFixed(1).padStart(5)}% ok</span>  pool ${String(db.pool_acquired ?? "-").padStart(2)}/40  queue ${String(db.bouncer_cl_waiting ?? "-").padStart(2)}  locks ${String(db.pg_lock_wait ?? "-").padStart(2)}  xact ${String(Math.round(db.longest_xact_s ?? 0)).padStart(3)}s${e ? `  <span class="bad">${esc(e)}</span>` : ""}`);
+      const okS = `<span class="${pct < 99 ? "bad" : "ok"}">${pct.toFixed(1).padStart(5)}% ok</span>`, er = e ? `  <span class="bad">${esc(e)}</span>` : "";
+      if (out.clientWidth < 420) // phones: one line that fits, without the padding
+        line(`<span class="c">${String(s).padStart(3)}s</span> ${okS} pool ${db.pool_acquired ?? "-"}/40 q ${db.bouncer_cl_waiting ?? "-"} lk ${db.pg_lock_wait ?? "-"} xact ${Math.round(db.longest_xact_s ?? 0)}s${er}`);
+      else
+        line(`<span class="c">t=${String(s).padStart(3)}s</span>  ${okS}  pool ${String(db.pool_acquired ?? "-").padStart(2)}/40  queue ${String(db.bouncer_cl_waiting ?? "-").padStart(2)}  locks ${String(db.pg_lock_wait ?? "-").padStart(2)}  xact ${String(Math.round(db.longest_xact_s ?? 0)).padStart(3)}s${er}`);
       follow.next += 10;
     }
     const w = r.batch_window;

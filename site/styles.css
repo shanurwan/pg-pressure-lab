@@ -421,3 +421,63 @@ pre.code .c { color: #7d879c; }
   .drawer-head, .drawer-body { padding-left: 16px; padding-right: 16px; }
   .coach-card { width: auto; left: 12px !important; right: 12px; }
 }
+
+/* ---------- review fixes (2026-11-18) ---------- */
+/* 1: nothing may widen the sidebar; right-column badge tips open leftwards */
+.sidebar { overflow-x: hidden; }
+.badges .bdg:nth-child(4n) .tip { left: auto; right: 0; transform: none; }
+.badges .bdg:nth-child(4n+3) .tip { left: auto; right: -40px; transform: none; }
+
+/* 2 + 3: compact tiles (2 rows of 4) with full-width sparklines */
+.metrics-panel .win-head { height: 36px; }
+.kpi { padding: 6px 10px 6px; }
+.kpi .l { font-size: 10.5px; }
+.kpi .v { margin-top: 2px; font-size: 15px; }
+.spark { height: 24px; margin-top: 3px; }
+.strip-wrap { padding: 6px 12px 5px; }
+.strip-box { height: 28px; }
+.strip-legend { margin-top: 4px; }
+
+/* 3: the time banner sits bottom-left above the legend; labels never sit on it */
+.hud { top: auto; left: 10px; bottom: 32px; }
+.lbl[data-k="api"], .lbl[data-k="bouncer"] { transform: translate(-50%, 0); }
+
+/* 4: compact objective rows; quiz options two-up on wide screens */
+.obj { padding: 7px 10px; }
+.obj.done .cmd { display: none; }
+.obj.done { padding-top: 5px; padding-bottom: 5px; }
+.objectives { max-height: min(31vh, 230px); }
+.objectives:has(.obj.current .quiz) { max-height: min(46vh, 340px); }
+@media (min-width: 1100px) {
+  .quiz .opts { grid-template-columns: 1fr 1fr; }
+  .opt { padding: 7px 10px; }
+}
+@media (max-height: 760px) and (min-width: 901px) {
+  .objectives { max-height: 25vh; padding-top: 10px; }
+  .obj-titles h1 { font-size: 16px; }
+  .obj-head { margin-bottom: 8px; }
+}
+@media (max-width: 900px) {
+  .objectives, .objectives:has(.obj.current .quiz) { max-height: none; }
+  .hud { bottom: 40px; }
+}
+/* the time/job readout moved into the metrics header */
+.hud { display: none; }
+.clock { min-width: 0; white-space: nowrap; }
+.clock b { color: var(--text); font-weight: 600; }
+.clock .jb { color: var(--job); }
+#run-label { flex: 0 1 auto; }
+.lbl small.jobline { color: #fdba74; }
+/* sparkline is a full-tile background: faint full-height job band, line along the bottom */
+.kpi { position: relative; padding-bottom: 30px; }
+.kpi .l, .kpi .v { position: relative; z-index: 1; }
+.spark { position: absolute; inset: 0; height: auto; margin: 0; z-index: 0; pointer-events: none; }
+.win-title { white-space: nowrap; }
+.clock { flex: none; }
+#run-label { flex: 1 1 0; }
+.xp-num, .wordmark { white-space: nowrap; }
+@media (max-width: 900px) {
+  .term-out { font-size: 10.5px; padding-left: 12px; padding-right: 12px; }
+  .metrics-panel #run-label { display: none; }
+}
+@media (max-width: 440px) { .wordmark { display: none; } }
