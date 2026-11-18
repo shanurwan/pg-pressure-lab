@@ -69,26 +69,77 @@ type bucket struct {
 // hundred requests per second for a few minutes that is well under a million
 // floats, so exact percentiles are cheap and nothing is estimated.
 type recorder struct {
-	mu sync.Mutex
-	b  map[key]*bucket
+	mu   sync.Mutex
+	b    map[key]*bucket
+	live map[key]*bucket // keyed by the second a request finished; nil unless -live
 }
 
 func newRecorder() *recorder { return &recorder{b: map[key]*bucket{}} }
 
-func (r *recorder) add(sec int, op string, d time.Duration, outcome string) {
+// enableLive starts keeping the per-finish-second view that takeLive drains.
+func (r *recorder) enableLive() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	k := key{sec, op}
-	b := r.b[k]
-	if b == nil {
-		b = &bucket{outcomes: map[string]int{}}
-		r.b[k] = b
+	r.live = map[key]*bucket{}
+}
+
+// add records a request under the second it was sent (sec), and, for the live
+// stream, under the second it finished (doneSec).
+func (r *recorder) add(sec, doneSec int, op string, d time.Duration, outcome string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range []struct {
+		m map[key]*bucket
+		k key
+	}{{r.b, key{sec, op}}, {r.live, key{doneSec, op}}} {
+		if k.m == nil {
+			continue
+		}
+		b := k.m[k.k]
+		if b == nil {
+			b = &bucket{outcomes: map[string]int{}}
+			k.m[k.k] = b
+		}
+		b.outcomes[outcome]++
+		if outcome == "ok" {
+			b.ok++
+			b.lat = append(b.lat, float64(d.Microseconds())/1000)
+		}
 	}
-	b.outcomes[outcome]++
-	if outcome == "ok" {
-		b.ok++
-		b.lat = append(b.lat, float64(d.Microseconds())/1000)
+}
+
+// liveOp is one operation's numbers in a live frame; the fields match the
+// site's frame format.
+type liveOp struct {
+	N      int            `json:"n"`
+	OK     int            `json:"ok"`
+	P50    float64        `json:"p50"`
+	P99    float64        `json:"p99"`
+	Errors map[string]int `json:"errors"`
+}
+
+// takeLive removes and returns what finished during second sec.
+func (r *recorder) takeLive(sec int) map[string]liveOp {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]liveOp{}
+	for k, b := range r.live {
+		if k.sec != sec {
+			continue
+		}
+		delete(r.live, k)
+		o := liveOp{OK: b.ok, Errors: map[string]int{}}
+		for code, c := range b.outcomes {
+			o.N += c
+			if code != "ok" {
+				o.Errors[code] = c
+			}
+		}
+		slices.Sort(b.lat)
+		o.P50, o.P99 = percentile(b.lat, 50), percentile(b.lat, 99)
+		out[k.op] = o
 	}
+	return out
 }
 
 // percentile returns the nearest-rank percentile of sorted values.

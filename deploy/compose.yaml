@@ -70,10 +70,22 @@ services:
   # One image with every tool; drills run it with `docker compose run`.
   tools:
     build: { context: .., dockerfile: deploy/Dockerfile }
+    image: pgpl-tools:latest
     profiles: [tools]
     volumes:
       - ../results:/results
     mem_limit: 1g
+
+  # The course site in live mode: follows the run in progress, read-only.
+  live:
+    image: pgpl-tools:latest
+    profiles: [live]
+    command: ["/app/live", "-results", "/results", "-site", "/site"]
+    volumes:
+      - ../results:/results:ro
+      - ../site:/site:ro
+    ports: ["127.0.0.1:58090:8090"]
+    mem_limit: 128m
 
 volumes:
   pgdata:

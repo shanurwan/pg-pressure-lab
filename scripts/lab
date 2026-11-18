@@ -5,6 +5,8 @@
 #   scripts/lab seed                    load data (ACCOUNTS, SYMBOLS, ORDERS)
 #   scripts/lab run <scenario> <round>  one recorded run; results/<scenario>/<round>/<time>/
 #   scripts/lab rounds <scenario>       list a scenario's rounds
+#   scripts/lab live                    the course site at http://localhost:58090, streaming
+#                                       whichever run is in progress
 #   scripts/lab psql                    a psql shell on the primary
 #   scripts/lab down                    stop and delete everything, data included
 #
@@ -92,15 +94,19 @@ cmd_run() {
 EOF
 
   "${DC[@]}" run -d --rm --name pgpl-sampler tools /app/sampler -out "/results/$rel/sampler.csv" >/dev/null
+  # Markers for the live view: the wall-clock second and what happened.
+  event() { printf '{"wall":"%s","event":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$dir/events.jsonl"; }
   local batch_pid=''
   if [[ -n $BATCH_ARGS ]]; then
     ( sleep "$BATCH_AT"
+      event batch_start
       # shellcheck disable=SC2086
       "${DC[@]}" run --rm tools /app/batch $BATCH_ARGS -out "/results/$rel/batch.json" >"$dir/batch.log" 2>&1 || true
+      event batch_end
     ) & batch_pid=$!
   fi
   "${DC[@]}" run --rm tools /app/load -rate "$RATE" -duration "$DURATION" -mix "$MIX" \
-    -out "/results/$rel" 2>&1 | tee "$dir/load.log"
+    -out "/results/$rel" -live "/results/$rel/live.jsonl" 2>&1 | tee "$dir/load.log"
   [[ -n $batch_pid ]] && wait "$batch_pid"
   docker stop pgpl-sampler >/dev/null 2>&1 || true
 
@@ -116,14 +122,18 @@ EOF
 case "${1:-}" in
   up)
     mkdir -p results
-    "${DC[@]}" build
+    "${DC[@]}" --profile tools build
     "${DC[@]}" up -d --wait pg-primary pgbouncer api ;;
   seed)
     "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v accounts="$ACCOUNTS" -v symbols="$SYMBOLS" \
       -v orders="$ORDERS" -f /seed/seed.sql ;;
   run)    [[ $# -eq 3 ]] || { echo "usage: $0 run <scenario> <round>" >&2; exit 2; }; cmd_run "$2" "$3" ;;
   rounds) grep -oE "^ *$2/[a-z-]+\)" "$0" | sed -E "s/ *$2\/(.*)\)/\1/" ;;
+  live)
+    "${DC[@]}" --profile live up -d live >/dev/null
+    echo "open http://localhost:58090/?live=1, then start a run in another terminal, for example:"
+    echo "  scripts/lab run batch naive" ;;
   psql)   "${DC[@]}" exec pg-primary psql -U postgres -d lab ;;
-  down)   "${DC[@]}" --profile tools down -v ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  down)   "${DC[@]}" --profile tools --profile live down -v ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
 esac

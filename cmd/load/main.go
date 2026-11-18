@@ -34,6 +34,7 @@ func main() {
 		timeout     = flag.Duration("timeout", 5*time.Second, "client timeout per request")
 		maxInflight = flag.Int("max-inflight", 4000, "requests in flight before new ones are dropped")
 		out         = flag.String("out", "", "directory for load.csv and summary.json (required)")
+		livePath    = flag.String("live", "", "also append one JSON line per second here, as requests finish (for scripts/lab live)")
 	)
 	flag.Parse()
 	if *out == "" {
@@ -55,6 +56,7 @@ func main() {
 
 	interval := time.Duration(float64(time.Second) / *rate)
 	start := time.Now()
+	stopLive := startLive(*livePath, rec, start)
 	log.Printf("sending %.0f req/s for %s, mix %s", *rate, *duration, *mixFlag)
 	for i := 0; ; i++ {
 		due := start.Add(time.Duration(i) * interval)
@@ -69,7 +71,7 @@ func main() {
 		select {
 		case sem <- struct{}{}:
 		default:
-			rec.add(sec, op, 0, "dropped")
+			rec.add(sec, sec, op, 0, "dropped")
 			continue
 		}
 		wg.Add(1)
@@ -78,10 +80,11 @@ func main() {
 			defer func() { <-sem }()
 			t0 := time.Now()
 			outcome := do(client, *baseURL, op, *accounts, *symbols)
-			rec.add(sec, op, time.Since(t0), outcome)
+			rec.add(sec, int(time.Since(start)/time.Second), op, time.Since(t0), outcome)
 		}()
 	}
 	wg.Wait()
+	stopLive()
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)
@@ -151,4 +154,53 @@ func do(c *http.Client, base, op string, accounts int64, symbols int) string {
 		return e.Error
 	}
 	return fmt.Sprintf("http_%d", resp.StatusCode)
+}
+
+// startLive appends a frame per second to path: what finished during the
+// previous second, with the wall-clock time the second began, so the live
+// server can line it up with the sampler. It returns a function that writes
+// the last frames and stops.
+func startLive(path string, rec *recorder, start time.Time) func() {
+	if path == "" {
+		return func() {}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Fatalf("-live: %v", err)
+	}
+	rec.enableLive()
+	enc := json.NewEncoder(f)
+	emit := func(sec int) {
+		_ = enc.Encode(map[string]any{
+			"t":    sec,
+			"wall": start.Add(time.Duration(sec) * time.Second).UTC().Format(time.RFC3339),
+			"ops":  rec.takeLive(sec),
+		})
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		next := 0
+		for {
+			select {
+			case <-done:
+				for ; next <= int(time.Since(start)/time.Second); next++ {
+					emit(next)
+				}
+				return
+			case <-tick.C:
+				for ; next < int(time.Since(start)/time.Second); next++ {
+					emit(next)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+		_ = f.Close()
+	}
 }

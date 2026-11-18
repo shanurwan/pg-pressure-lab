@@ -41,13 +41,30 @@ func TestParseMix(t *testing.T) {
 
 func TestFailuresAreCountedNotTimed(t *testing.T) {
 	r := newRecorder()
-	r.add(0, "order", 10*time.Millisecond, "ok")
-	r.add(0, "order", time.Millisecond, "lock_timeout")
+	r.add(0, 0, "order", 10*time.Millisecond, "ok")
+	r.add(0, 1, "order", time.Millisecond, "lock_timeout")
 	s := r.summary()["order"]
 	if s.N != 2 || s.OK != 1 || s.Errors["lock_timeout"] != 1 {
 		t.Fatalf("counts wrong: %+v", s)
 	}
 	if s.P50 != 10 {
 		t.Fatalf("a fast failure leaked into latency: p50 = %v", s.P50)
+	}
+}
+
+func TestLiveIsKeyedByFinishSecond(t *testing.T) {
+	r := newRecorder()
+	r.enableLive()
+	r.add(0, 3, "order", 20*time.Millisecond, "ok")
+	r.add(0, 3, "order", time.Millisecond, "deadline")
+	if got := r.takeLive(0); len(got) != 0 {
+		t.Fatalf("second 0 should be empty in the live view, got %v", got)
+	}
+	got := r.takeLive(3)["order"]
+	if got.N != 2 || got.OK != 1 || got.Errors["deadline"] != 1 || got.P50 != 20 {
+		t.Fatalf("live frame wrong: %+v", got)
+	}
+	if again := r.takeLive(3); len(again) != 0 {
+		t.Fatalf("a taken second must not be sent twice: %v", again)
 	}
 }
