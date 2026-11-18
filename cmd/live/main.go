@@ -1,4 +1,4 @@
-// Command live serves the course site against your own lab: it follows the
+// Command live serves the interactive replays against your own lab: it follows the
 // newest run under the results directory as it is being recorded and streams
 // one frame per second over Server-Sent Events at /live/events, in the same
 // format the site replays from recorded runs.

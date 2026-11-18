@@ -1,4 +1,4 @@
-// The course. Every number in the text is computed from site/data (written by
+// The lessons. Every number in the text is computed from site/data (written by
 // cmd/sitedata from the recorded runs), so the prose cannot drift from what
 // was measured. Each lesson picks a run to replay, a moment to start at, the
 // chart signals to draw, and terminal suggestions.

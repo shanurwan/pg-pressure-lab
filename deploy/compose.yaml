@@ -77,7 +77,7 @@ services:
       - ../results:/results
     mem_limit: 1g
 
-  # The course site in live mode: follows the run in progress, read-only.
+  # The interactive replays in live mode: follows the run in progress, read-only.
   live:
     image: pgpl-tools:latest
     profiles: [live]

@@ -1,4 +1,4 @@
-// Command sitedata turns recorded runs into the JSON the course site replays.
+// Command sitedata turns recorded runs into the JSON the interactive replays use.
 //
 //	sitedata -results results -out site/data
 //

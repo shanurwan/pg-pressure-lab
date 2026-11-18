@@ -4,7 +4,7 @@ Reproducible drills for the ways a busy PostgreSQL behind an API gets into troub
 
 The application is a small brokerage-style API in Go (pgx): account and position reads, order placement that locks the account row, and one deliberately expensive report. It runs behind PgBouncer in transaction mode, on PostgreSQL 17 seeded with 200,000 accounts, 2 million positions and 20 million orders.
 
-**Course site: <https://shanurwan.github.io/pg-pressure-lab/>**: every recorded run replayed in 3D, with a terminal to drive it and lessons built from the numbers below.
+**Interactive replays: <https://shanurwan.github.io/pg-pressure-lab/>**: every recorded run replayed in 3D, with a terminal to drive it and lessons built from the numbers below.
 
 ```
  load (open loop) ──► api (Go, pgx pools) ──► PgBouncer ──► PostgreSQL 17
@@ -91,7 +91,7 @@ One request in a hundred asks for a report that scans the orders table. Alone it
 
 ## Live mode
 
-`scripts/lab live` serves the course site at <http://localhost:58090> and streams whatever run is in progress into it, one frame a second over Server-Sent Events (`/live/events`), in the same format the site replays. Start a run in another terminal and watch it.
+`scripts/lab live` serves the interactive replays at <http://localhost:58090> and streams whatever run is in progress into it, one frame a second over Server-Sent Events (`/live/events`), in the same format the site replays. Start a run in another terminal and watch it.
 
 ## MCP server
 
@@ -121,7 +121,7 @@ cmd/live      live mode: the site plus a stream of the run in progress
 cmd/mcp       MCP server over the recorded runs
 cmd/sitedata  builds site/data from results/
 internal/runs reading runs: tables, timelines, first signals
-site/         the course site (GitHub Pages)
+site/         the interactive replays (GitHub Pages)
 deploy/       compose file, schema, seed, PgBouncer config
 scripts/lab   the driver: rounds are defined at the top
 results/      recorded runs

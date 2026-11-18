@@ -5,7 +5,7 @@
 #   scripts/lab seed                    load data (ACCOUNTS, SYMBOLS, ORDERS)
 #   scripts/lab run <scenario> <round>  one recorded run; results/<scenario>/<round>/<time>/
 #   scripts/lab rounds <scenario>       list a scenario's rounds
-#   scripts/lab live                    the course site at http://localhost:58090, streaming
+#   scripts/lab live                    the interactive replays at http://localhost:58090, streaming
 #                                       whichever run is in progress
 #   scripts/lab psql                    a psql shell on the primary
 #   scripts/lab down                    stop and delete everything, data included

@@ -1,11 +1,11 @@
-2026/11/18 05:19:45 {
+{
   "mode": "naive",
   "as_of": "2026-11-18",
-  "started_at": "2026-11-18T05:19:06.59963087Z",
-  "seconds": 38.623507697,
+  "started_at": "2026-11-18T05:36:27.900011107Z",
+  "seconds": 38.808899859,
   "chunks": 1,
   "lock_timeout_retries": 0,
   "snapshot_rows": 2000000,
   "accounts_marked": 200000,
-  "rollup_rows": 154328
+  "rollup_rows": 162268
 }

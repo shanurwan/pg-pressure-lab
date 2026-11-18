@@ -1,4 +1,4 @@
-// pg-pressure-lab course site. Replays recorded runs from site/data, or in
+// pg-pressure-lab interactive replays. Replays recorded runs from site/data, or in
 // live mode follows frames streamed from /live/events (same frame format).
 import { LESSONS, range } from "./lessons.js";
 import { createScene } from "./scene.js";
