@@ -1,0 +1,8 @@
+2026/11/18 07:19:32 {
+  "mode": "alter-naive",
+  "started_at": "2026-11-18T07:18:47.038689865Z",
+  "seconds": 45.22075901,
+  "lock_wait_s": 43.15758554,
+  "attempts": 1,
+  "reader_held_s": 45.153663601
+}

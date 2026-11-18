@@ -1,0 +1,6 @@
+2026/11/18 06:33:40 sending 300 req/s for 3m0s, mix account=40,positions=25,orders=10,order=25
+2026/11/18 06:36:40 retry immediate: 54001 original requests, 21951 retries sent, 0 refused by the budget
+2026/11/18 06:36:40 account   n=21809  ok=0.9198 p50=1.9     p99=8110.7  max=9244.4  errors=map[deadline:1749]
+2026/11/18 06:36:40 order     n=13402  ok=0.8312 p50=5.2     p99=7326.6  max=8503.6  errors=map[deadline:2262]
+2026/11/18 06:36:40 orders    n=5381   ok=0.9318 p50=3.0     p99=8111.3  max=8741.5  errors=map[canceled:1 deadline:366]
+2026/11/18 06:36:40 positions n=13409  ok=0.9370 p50=2.1     p99=8109.5  max=8678.1  errors=map[deadline:845]

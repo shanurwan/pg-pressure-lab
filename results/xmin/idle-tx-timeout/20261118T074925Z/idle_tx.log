@@ -1,0 +1,7 @@
+2026/11/18 07:52:25 {
+  "mode": "idle-tx",
+  "started_at": "2026-11-18T07:50:05.689511309Z",
+  "seconds": 140.081839678,
+  "reader_held_s": 140.055508141,
+  "error": "session ended while idle: write failed: write tcp 172.29.0.9:47748-\u003e172.29.0.2:5432: write: broken pipe"
+}

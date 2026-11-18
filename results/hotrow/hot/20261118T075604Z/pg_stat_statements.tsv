@@ -1,0 +1,12 @@
+1376	164325.2	119.42	652.2	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+232	424.9	1.83	33.1	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+1375	217.4	0.16	11.0	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+223	187.8	0.84	13.7	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+185	142.7	0.77	18.3	SELECT coalesce((SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = $1), $2), coalesce(pg_total_relation_size(to
+691	114.7	0.17	5.8	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+425	57.1	0.13	2.9	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+185	27.1	0.15	1.2	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+185	14.2	0.08	0.9	SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()
+1374	5.1	0.00	0.1	commit
+1397	4.6	0.00	0.2	begin
+1	0.3	0.28	0.3	SELECT pg_stat_statements_reset()

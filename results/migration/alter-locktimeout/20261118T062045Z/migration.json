@@ -1,0 +1,8 @@
+{
+  "mode": "alter-locktimeout",
+  "started_at": "2026-11-18T06:21:23.110987648Z",
+  "seconds": 45.768208946,
+  "lock_wait_s": 43.737826859,
+  "attempts": 12,
+  "reader_held_s": 45.066263435
+}

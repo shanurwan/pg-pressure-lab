@@ -1,0 +1,7 @@
+{"scenario":"conn","round":"shared","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=37,positions=25,orders=10,order=25,report=3","batch_args":"","role_sql":"",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "api_acquire_timeout":"0","api_min_query_budget":"0",
+ "api_cancel_mode":"deadline","api_write_fills":"0","api_order_locking":"first",
+ "load_args":"","pre_sql":[],"jobs":[],"trigger":"",
+ "commit":"1485aa9","started_utc":"20261118T070150Z"}

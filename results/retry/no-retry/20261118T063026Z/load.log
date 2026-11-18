@@ -1,0 +1,5 @@
+2026/11/18 06:30:32 sending 300 req/s for 3m0s, mix account=40,positions=25,orders=10,order=25
+2026/11/18 06:33:32 account   n=21730  ok=0.9280 p50=1.8     p99=884.2   max=2981.5  errors=map[canceled:38 deadline:1526]
+2026/11/18 06:33:32 order     n=13361  ok=0.9290 p50=5.1     p99=650.1   max=1993.1  errors=map[canceled:20 deadline:928]
+2026/11/18 06:33:32 orders    n=5376   ok=0.9455 p50=2.9     p99=2117.4  max=2853.4  errors=map[deadline:293]
+2026/11/18 06:33:32 positions n=13534  ok=0.9429 p50=2.0     p99=2106.5  max=2850.9  errors=map[deadline:773]

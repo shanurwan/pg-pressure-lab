@@ -1,0 +1,7 @@
+{"scenario":"xmin","round":"idle-tx-timeout","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=35,positions=20,orders=10,order=20,market=15","batch_args":"","role_sql":"ALTER ROLE batch SET idle_in_transaction_session_timeout = '10s';",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "api_acquire_timeout":"0","api_min_query_budget":"0",
+ "api_cancel_mode":"deadline","api_write_fills":"0","api_order_locking":"first",
+ "load_args":"","pre_sql":["VACUUM (FULL, ANALYZE) quotes"],"jobs":["0|churn|/app/churn -rate 2000 -duration 180s -dsn postgres://postgres@pg-primary:5432/lab -out {out}","30|idle_tx|/app/migrate -mode idle-tx -hold 140s -dsn postgres://batch@pg-primary:5432/lab -out {out}"],"trigger":"idle_tx",
+ "commit":"1485aa9","started_utc":"20261118T074925Z"}

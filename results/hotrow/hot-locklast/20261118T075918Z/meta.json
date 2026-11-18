@@ -1,0 +1,7 @@
+{"scenario":"hotrow","round":"hot-locklast","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=20,positions=10,orders=10,order=60","batch_args":"","role_sql":"",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "api_acquire_timeout":"0","api_min_query_budget":"0",
+ "api_cancel_mode":"deadline","api_write_fills":"0","api_order_locking":"last",
+ "load_args":"-hot-pct 100","pre_sql":[],"jobs":[],"trigger":"",
+ "commit":"06efb53","started_utc":"20261118T075918Z"}

@@ -1,0 +1,67 @@
+{
+  "duration_s": 180,
+  "mix": "account=35,positions=20,orders=10,order=20,market=15",
+  "ops": {
+    "account": {
+      "n": 19169,
+      "ok": 19169,
+      "ok_ratio": 1,
+      "p50_ms": 4.57,
+      "p95_ms": 28.514,
+      "p99_ms": 71.92,
+      "max_ms": 268.788,
+      "errors": {}
+    },
+    "market": {
+      "n": 8084,
+      "ok": 8084,
+      "ok_ratio": 1,
+      "p50_ms": 7.456,
+      "p95_ms": 34.362,
+      "p99_ms": 78.543,
+      "max_ms": 248.185,
+      "errors": {}
+    },
+    "order": {
+      "n": 10679,
+      "ok": 10679,
+      "ok_ratio": 1,
+      "p50_ms": 19.028,
+      "p95_ms": 78.824,
+      "p99_ms": 161.936,
+      "max_ms": 413.227,
+      "errors": {}
+    },
+    "orders": {
+      "n": 5439,
+      "ok": 5439,
+      "ok_ratio": 1,
+      "p50_ms": 7.694,
+      "p95_ms": 36.016,
+      "p99_ms": 86.486,
+      "max_ms": 249.117,
+      "errors": {}
+    },
+    "positions": {
+      "n": 10630,
+      "ok": 10630,
+      "ok_ratio": 1,
+      "p50_ms": 4.987,
+      "p95_ms": 30.073,
+      "p99_ms": 76.447,
+      "max_ms": 271.89,
+      "errors": {}
+    }
+  },
+  "rate": 300,
+  "retry": {
+    "budget": 0,
+    "max": 0,
+    "mode": "none",
+    "original_requests": 54001,
+    "retries_denied_by_budget": 0,
+    "retries_sent": 0
+  },
+  "started_at": "2026-11-18T07:49:34Z",
+  "timeout_s": 5
+}

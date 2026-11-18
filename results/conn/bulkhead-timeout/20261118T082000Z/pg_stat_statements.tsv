@@ -1,0 +1,14 @@
+396	171098.0	432.07	962.3	SELECT date_trunc($2, created_at) AS day, count(*), coalesce(sum(qty), $3) FROM orders WHERE account_id BETWEEN $1 AND $
+13545	19518.7	1.44	140.8	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+13533	12049.2	0.89	61.0	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+5397	9455.6	1.75	84.1	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+19935	5072.9	0.25	46.9	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+13533	4272.2	0.32	54.3	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+6772	1599.7	0.24	45.5	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+184	254.1	1.38	45.6	SELECT coalesce((SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = $1), $2), coalesce(pg_total_relation_size(to
+13533	84.4	0.01	5.2	commit
+184	61.7	0.34	2.2	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+13533	56.5	0.00	3.8	begin
+184	14.6	0.08	0.2	SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()
+1	0.4	0.37	0.4	SELECT pg_stat_statements_reset()
+2	0.0	0.02	0.0	select $1

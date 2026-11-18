@@ -1,0 +1,5 @@
+2026/11/18 06:52:30 sending 300 req/s for 3m0s, mix account=20,positions=10,orders=10,order=60
+2026/11/18 06:55:30 account   n=10854  ok=1.0000 p50=1.8     p99=382.4   max=690.6   errors=map[]
+2026/11/18 06:55:30 order     n=32439  ok=1.0000 p50=4.7     p99=508.6   max=999.9   errors=map[]
+2026/11/18 06:55:30 orders    n=5414   ok=1.0000 p50=2.8     p99=362.1   max=693.9   errors=map[]
+2026/11/18 06:55:30 positions n=5294   ok=1.0000 p50=2.0     p99=390.6   max=695.6   errors=map[]

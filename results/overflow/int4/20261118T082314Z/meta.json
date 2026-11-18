@@ -1,0 +1,7 @@
+{"scenario":"overflow","round":"int4","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=40,positions=25,orders=10,order=25","batch_args":"","role_sql":"",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "api_acquire_timeout":"0","api_min_query_budget":"0",
+ "api_cancel_mode":"deadline","api_write_fills":"1","api_order_locking":"first",
+ "load_args":"","pre_sql":["TRUNCATE order_fills","DELETE FROM orders WHERE id > 2147483647 - 50000","ALTER TABLE order_fills ALTER COLUMN order_id TYPE integer","SELECT setval('orders_id_seq', 2147483647 - 4500)"],"jobs":[],"trigger":"",
+ "commit":"a618017","started_utc":"20261118T082314Z"}

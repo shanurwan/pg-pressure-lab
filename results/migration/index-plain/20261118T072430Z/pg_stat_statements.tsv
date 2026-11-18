@@ -1,0 +1,13 @@
+1	87899.0	87898.99	87899.0	CREATE INDEX orders_symbol_idx ON orders (symbol)
+4043	16509.9	4.08	72.3	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+10121	4236.4	0.42	42.9	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+4669	2893.1	0.62	44.9	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+15887	2660.5	0.17	70.3	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+4680	847.1	0.18	42.8	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+2349	456.8	0.19	12.4	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+183	148.6	0.81	5.2	SELECT coalesce((SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = $1), $2), coalesce(pg_total_relation_size(to
+10010	53.3	0.01	1.5	begin
+183	37.5	0.20	0.7	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+4668	25.3	0.01	4.9	commit
+183	15.3	0.08	2.0	SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()
+1	0.3	0.30	0.3	SELECT pg_stat_statements_reset()

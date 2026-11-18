@@ -1,0 +1,4 @@
+{"wall":"2026-11-18T06:43:05Z","event":"churn_start"}
+{"wall":"2026-11-18T06:43:35Z","event":"idle_tx_start"}
+{"wall":"2026-11-18T06:45:57Z","event":"idle_tx_end"}
+{"wall":"2026-11-18T06:46:06Z","event":"churn_end"}
