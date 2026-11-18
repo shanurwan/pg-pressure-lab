@@ -1,0 +1,49 @@
+{
+  "duration_s": 180,
+  "mix": "account=40,positions=25,orders=10,order=25",
+  "ops": {
+    "account": {
+      "n": 21914,
+      "ok": 21914,
+      "ok_ratio": 1,
+      "p50_ms": 4.567,
+      "p95_ms": 68.681,
+      "p99_ms": 346.945,
+      "max_ms": 827.677,
+      "errors": {}
+    },
+    "order": {
+      "n": 13525,
+      "ok": 13525,
+      "ok_ratio": 1,
+      "p50_ms": 16.914,
+      "p95_ms": 206.427,
+      "p99_ms": 529.138,
+      "max_ms": 1021.063,
+      "errors": {}
+    },
+    "orders": {
+      "n": 5300,
+      "ok": 5300,
+      "ok_ratio": 1,
+      "p50_ms": 13.657,
+      "p95_ms": 100.155,
+      "p99_ms": 375.476,
+      "max_ms": 816.547,
+      "errors": {}
+    },
+    "positions": {
+      "n": 13262,
+      "ok": 13262,
+      "ok_ratio": 1,
+      "p50_ms": 5.563,
+      "p95_ms": 80.404,
+      "p99_ms": 337.652,
+      "max_ms": 826.364,
+      "errors": {}
+    }
+  },
+  "rate": 300,
+  "started_at": "2026-11-18T03:58:42Z",
+  "timeout_s": 5
+}

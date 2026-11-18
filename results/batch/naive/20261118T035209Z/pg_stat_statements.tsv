@@ -1,0 +1,15 @@
+1	26336.6	26336.61	26336.6	INSERT INTO position_snapshots (as_of, account_id, symbol, qty, market_value) SELECT $1::date, p.account_id, p.symbol, p
+1800	18229.3	10.13	104.3	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+1	12113.3	12113.30	12113.3	INSERT INTO daily_activity (as_of, account_id, orders, notional) SELECT $1::date, account_id, count(*), sum(qty * coales
+1	7904.7	7904.73	7904.7	UPDATE accounts a SET equity = a.cash + s.mv, updated_at = now() FROM (SELECT account_id, sum(market_value) AS mv FROM p
+4644	4872.8	1.05	38.0	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+4685	3793.6	0.81	34.4	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+7383	1038.2	0.14	21.3	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+4644	992.8	0.21	30.7	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+2302	512.0	0.22	11.1	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+4644	43.9	0.01	18.1	commit
+186	38.3	0.21	0.7	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+4701	29.5	0.01	8.7	begin
+1	1.0	1.05	1.0	SELECT min(id), max(id) FROM accounts
+1	0.3	0.30	0.3	SELECT pg_stat_statements_reset()
+1	0.1	0.12	0.1	commit

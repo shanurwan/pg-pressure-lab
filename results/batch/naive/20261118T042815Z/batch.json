@@ -1,0 +1,11 @@
+{
+  "mode": "naive",
+  "as_of": "2026-11-18",
+  "started_at": "2026-11-18T04:28:55.415899958Z",
+  "seconds": 55.31975055,
+  "chunks": 1,
+  "lock_timeout_retries": 0,
+  "snapshot_rows": 2000000,
+  "accounts_marked": 200000,
+  "rollup_rows": 118654
+}

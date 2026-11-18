@@ -1,0 +1,4 @@
+{"scenario":"batch","round":"chunked","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=40,positions=25,orders=10,order=25","batch_args":"-mode chunked -dsn postgres://batch@pgbouncer:6432/lab_batch?default_query_exec_mode=exec -chunk 1000 -lock-timeout 100ms","role_sql":"",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "commit":"88d2240","started_utc":"20261118T040458Z"}

@@ -1,0 +1,10 @@
+5300	51776.6	9.77	131.1	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+13525	14454.4	1.07	51.2	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+13262	13215.2	1.00	71.2	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+21914	3189.6	0.15	39.3	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+13525	2607.7	0.19	34.4	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+6735	1502.7	0.22	111.9	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+13525	64.0	0.00	1.5	commit
+13525	59.9	0.00	3.5	begin
+183	57.4	0.31	6.6	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+1	0.2	0.19	0.2	SELECT pg_stat_statements_reset()

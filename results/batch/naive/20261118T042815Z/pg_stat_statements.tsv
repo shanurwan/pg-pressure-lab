@@ -1,0 +1,15 @@
+1	29244.3	29244.28	29244.3	INSERT INTO position_snapshots (as_of, account_id, symbol, qty, market_value) SELECT $1::date, p.account_id, p.symbol, p
+1	12565.0	12565.03	12565.0	INSERT INTO daily_activity (as_of, account_id, orders, notional) SELECT $1::date, account_id, count(*), sum(qty * coales
+1	10724.2	10724.17	10724.2	UPDATE accounts a SET equity = a.cash + s.mv, updated_at = now() FROM (SELECT account_id, sum(market_value) AS mv FROM p
+952	8505.2	8.93	142.3	SELECT id, symbol, side, qty, coalesce(limit_price, $2), status, created_at FROM orders WHERE account_id = $1 ORDER BY c
+2538	6866.5	2.71	81.3	SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol
+2506	2583.5	1.03	95.1	INSERT INTO orders (account_id, symbol, side, qty, limit_price, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+1	2501.5	2501.54	2501.5	DELETE FROM position_snapshots WHERE as_of = $1::date
+2506	574.3	0.23	35.1	SELECT buying_power FROM accounts WHERE id = $1 AND status = $2 FOR UPDATE
+3975	504.3	0.13	8.7	SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1
+1219	270.1	0.22	10.4	UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1
+1	137.8	137.79	137.8	DELETE FROM daily_activity WHERE as_of = $1::date
+2506	66.8	0.03	50.8	commit
+185	35.5	0.19	1.6	SELECT count(*) FILTER (WHERE state = $1), count(*) FILTER (WHERE state = $2), count(*) FILTER (WHERE wait_event_type = 
+2559	13.8	0.01	3.4	begin
+185	13.7	0.07	0.4	SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()

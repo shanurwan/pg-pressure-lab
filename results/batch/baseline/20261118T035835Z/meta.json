@@ -1,0 +1,4 @@
+{"scenario":"batch","round":"baseline","rate":300,"duration":"180s","batch_at_s":30,
+ "mix":"account=40,positions=25,orders=10,order=25","batch_args":"","role_sql":"",
+ "api_report_pool":"","api_request_timeout":"2s",
+ "commit":"88d2240","started_utc":"20261118T035835Z"}

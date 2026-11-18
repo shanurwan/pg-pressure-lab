@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PostgreSQL Under Pressure</title>
+<meta name="description" content="A free, hands-on course built from real recorded runs: how an overnight batch job takes down a PostgreSQL-backed API, why it does not come back on its own, and the fixes, measured.">
+<meta name="theme-color" content="#0b1020">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div class="bg-grid" aria-hidden="true"></div>
+
+<header class="top">
+  <a class="brand" href="./" aria-label="PostgreSQL Under Pressure, home">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span>pg-pressure-lab</span>
+  </a>
+  <nav class="top-nav">
+    <a href="#course">Course</a>
+    <a href="#developers">Run it yourself</a>
+    <a href="https://github.com/shanurwan/pg-pressure-lab">GitHub</a>
+    <button id="theme" class="icon-btn" type="button" aria-label="Switch light or dark theme">◐</button>
+  </nav>
+</header>
+
+<section class="hero">
+  <p class="kicker">A free, hands-on course · built from real recorded runs</p>
+  <h1>The batch job finished.<br><em>The outage didn't.</em></h1>
+  <p class="lede" id="hero-lede">Loading the recorded runs…</p>
+  <div class="hero-stats" id="hero-stats" aria-live="polite"></div>
+  <div class="hero-cta">
+    <a class="btn primary" href="#course" id="start">Start lesson 1</a>
+    <a class="btn ghost" href="#developers">Run it on your machine</a>
+  </div>
+</section>
+
+<main id="course" class="course">
+  <aside class="lessons" aria-label="Lessons">
+    <p class="lessons-title">Lessons</p>
+    <ol id="lesson-list"></ol>
+    <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
+  </aside>
+
+  <section class="stage">
+    <article class="lesson-card" id="lesson" aria-live="polite"></article>
+
+    <div class="viz panel">
+      <div class="viz-head">
+        <div class="run-label">
+          <span class="badge" id="mode-badge">REPLAY</span>
+          <span id="run-desc">—</span>
+        </div>
+        <label class="run-pick">Run
+          <select id="run-select" aria-label="Recorded run"></select>
+        </label>
+      </div>
+      <div class="scene-wrap">
+        <canvas id="scene" aria-label="3D view of requests flowing from the API through the pools to PostgreSQL"></canvas>
+        <div id="labels" class="labels" aria-hidden="true"></div>
+        <div class="hud" id="hud" aria-live="off"></div>
+        <div class="legend" aria-hidden="true">
+          <span><i class="dot ok"></i>succeeded</span>
+          <span><i class="dot bad"></i>timed out</span>
+          <span><i class="dot shed"></i>refused fast</span>
+          <span><i class="dot batch"></i>batch transaction</span>
+        </div>
+        <p class="nogl" id="nogl" hidden>Your browser has WebGL turned off, so the 3D view is hidden. The chart, terminal and timeline below show the same run.</p>
+      </div>
+      <div class="timeline">
+        <button id="play" class="icon-btn" type="button" aria-label="Play">▶</button>
+        <input id="scrub" type="range" min="0" max="179" value="0" step="1" aria-label="Time in the run, seconds">
+        <span class="clock" id="clock">0 s</span>
+        <select id="speed" aria-label="Replay speed">
+          <option value="1">1×</option><option value="4">4×</option>
+          <option value="10" selected>10×</option><option value="30">30×</option>
+        </select>
+        <button id="share" class="icon-btn" type="button" aria-label="Copy a link to this moment">🔗</button>
+      </div>
+      <canvas id="chart" class="chart" height="170" aria-label="Chart of the run, second by second"></canvas>
+      <div class="chart-key" id="chart-key"></div>
+    </div>
+
+    <div class="terminal panel" id="terminal">
+      <div class="term-head">
+        <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>lab — replaying recorded files, not a live database</span>
+      </div>
+      <div class="term-body" id="term-out" role="log" aria-live="polite"></div>
+      <form class="term-in" id="term-form" autocomplete="off">
+        <span class="prompt">$</span>
+        <input id="term-input" spellcheck="false" aria-label="Type a command, for example: lab run batch naive" placeholder="type: help">
+      </form>
+      <div class="chips" id="chips"></div>
+    </div>
+  </section>
+</main>
+
+<section id="developers" class="dev">
+  <p class="kicker">Developers</p>
+  <h2>Run it on your own machine</h2>
+  <p class="dev-lede">Everything on this page is a replay of files in <code>results/</code>. To watch it happen for real, run the lab yourself: the same page then switches to <strong>live mode</strong> and follows your run second by second.</p>
+  <div class="dev-grid">
+    <div class="panel step">
+      <h3><span class="num">1</span>Start the lab</h3>
+      <p>Needs Docker with Compose v2, about 5 GB of free memory and 6 GB of disk.</p>
+      <pre><code>git clone https://github.com/shanurwan/pg-pressure-lab
+cd pg-pressure-lab
+scripts/lab up
+scripts/lab seed     # 200k accounts, 2M positions, 20M orders</code></pre>
+      <p class="muted" id="seed-note">The seed is the slow part: a few minutes. <code>ORDERS=1000000 scripts/lab seed</code> for a quick try.</p>
+    </div>
+    <div class="panel step">
+      <h3><span class="num">2</span>Open live mode</h3>
+      <p>This site, served by the lab, reading your runs as they are written.</p>
+      <pre><code>scripts/lab live
+# open http://localhost:58090</code></pre>
+      <p class="muted">Live mode streams one frame per second from <code>/live/events</code> (Server-Sent Events). The badge above the 3D view turns <span class="live-word">LIVE</span>.</p>
+    </div>
+    <div class="panel step">
+      <h3><span class="num">3</span>Break it, then fix it</h3>
+      <pre><code>scripts/lab rounds batch
+scripts/lab run batch naive
+scripts/lab run batch naive-failfast
+scripts/lab run batch chunked
+go run ./cmd/report -scenario batch</code></pre>
+      <p class="muted">Each run writes <code>results/&lt;scenario&gt;/&lt;round&gt;/&lt;time&gt;/</code>. Rebuild this site's data with <code>go run ./cmd/sitedata</code>.</p>
+    </div>
+  </div>
+
+  <details class="panel schema">
+    <summary>The frame format (replay files and the live stream use the same one)</summary>
+<pre><code>{ "t": 42,
+  "ops": { "order": { "n": 75, "ok": 75, "p50": 14.9, "p99": 210.0, "errors": {} } },
+  "db":  { "pg_active": 3, "pg_idle_in_tx": 0, "pg_lock_wait": 0, "pg_total": 21,
+           "longest_xact_s": 12.0, "bouncer_cl_waiting": 0, "bouncer_maxwait_ms": 0,
+           "pool_acquired": 4, "pool_empty_acquires": 0,
+           "pg_sessions_started": 0, "pg_sessions_abandoned": 0 },
+  "events": ["batch_start"] }</code></pre>
+  </details>
+
+  <h2 class="mcp-title">Ask an AI assistant about the runs</h2>
+  <p class="dev-lede">The lab ships an <strong>MCP server</strong> (<code>cmd/mcp</code>), so Claude or any MCP client can read the same recorded runs this page replays: compare rounds, zoom into the seconds around a failure, and ask which signal moved first. With <code>-allow-run</code> it can also run a drill on your local lab and read the result.</p>
+  <div class="dev-grid">
+    <div class="panel step">
+      <h3><span class="num">1</span>Add it</h3>
+      <pre><code>cd pg-pressure-lab
+claude mcp add pg-pressure-lab -- \
+  go run ./cmd/mcp -repo "$PWD"
+
+# let it run drills on your lab too:
+claude mcp add pg-pressure-lab -- \
+  go run ./cmd/mcp -repo "$PWD" -allow-run</code></pre>
+    </div>
+    <div class="panel step">
+      <h3><span class="num">2</span>The tools</h3>
+      <p><code>list_rounds</code> what each round changes<br>
+      <code>list_runs</code> headline numbers and the comparison table<br>
+      <code>get_timeline</code> second by second, every layer<br>
+      <code>first_signals</code> which signal rose first, and how long before the first failure<br>
+      <code>run_drill</code> run one round (only with <code>-allow-run</code>)</p>
+    </div>
+    <div class="panel step">
+      <h3><span class="num">3</span>Ask it</h3>
+      <p class="muted">"Compare naive and naive-failfast. Why did one recover and the other not?"</p>
+      <p class="muted">"For the latest naive run, what should we have alerted on, and how much warning would it have given?"</p>
+      <p class="muted">"Run batch chunked at 150 req/s and tell me if anything failed."</p>
+    </div>
+  </div>
+</section>
+
+<footer class="foot">
+  <p>Built from recorded runs on a single host. Numbers compare rounds run on the same machine; they are not a benchmark of PostgreSQL. Code and raw results: <a href="https://github.com/shanurwan/pg-pressure-lab">github.com/shanurwan/pg-pressure-lab</a> · Apache-2.0</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

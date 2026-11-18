@@ -1,0 +1,11 @@
+2026/11/18 03:57:43 {
+  "mode": "chunked",
+  "as_of": "2026-11-18",
+  "started_at": "2026-11-18T03:56:04.422721794Z",
+  "seconds": 99.513167915,
+  "chunks": 200,
+  "lock_timeout_retries": 0,
+  "snapshot_rows": 2000000,
+  "accounts_marked": 200000,
+  "rollup_rows": 77211
+}
