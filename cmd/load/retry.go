@@ -79,7 +79,7 @@ func (b *retryBudget) original() {
 func (b *retryBudget) take() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.tokens < 1 {
+	if b.tokens < 1-1e-9 { // ratio steps are not exact in floating point
 		return false
 	}
 	b.tokens--

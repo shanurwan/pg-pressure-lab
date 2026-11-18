@@ -326,7 +326,7 @@ type blockReport struct {
 }
 
 // accountReport is a slow but finishable report: a year of orders for a block
-// of 1,000 accounts, read through the (account_id, created_at) index. Alone it
+// of 200 accounts, read through the (account_id, created_at) index. Alone it
 // takes a few hundred milliseconds; under load it holds a pooled connection
 // that long, which is the point of the conn drill.
 func (s *server) accountReport(ctx context.Context, r *http.Request) (any, error) {
@@ -338,7 +338,7 @@ func (s *server) accountReport(ctx context.Context, r *http.Request) (any, error
 	err = s.withConn(ctx, s.report, func(c *pgxpool.Conn) error {
 		rows, _ := c.Query(ctx,
 			`SELECT date_trunc('month', created_at) AS day, count(*), coalesce(sum(qty), 0)
-			   FROM orders WHERE account_id BETWEEN $1 AND $1 + 999
+			   FROM orders WHERE account_id BETWEEN $1 AND $1 + 199
 			  GROUP BY 1 ORDER BY 1 DESC`, id)
 		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[blockReport])
 		return err

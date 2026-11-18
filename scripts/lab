@@ -73,7 +73,7 @@ round() {
     batch/chunked)   BATCH_ARGS="-mode chunked -dsn $BATCH_OWN -chunk 1000 -lock-timeout 100ms" ;;
 
     # A slow report that shares the pool with everything else. The report reads
-    # a year of orders for 1,000 accounts: a few hundred milliseconds alone.
+    # a year of orders for 200 accounts: about 300 ms alone.
     conn/baseline)   ;;
     conn/shared)     MIX='account=37,positions=25,orders=10,order=25,report=3' ;;
     conn/bulkhead)   MIX='account=37,positions=25,orders=10,order=25,report=3'
@@ -100,13 +100,16 @@ round() {
                      JOBS=("$BATCH_AT|migration|/app/migrate -mode index-concurrently -dsn $ADMIN_DIRECT -out {out}") ;;
 
     # Clients retrying into a short outage: a 15 s exclusive lock on accounts.
-    retry/no-retry)  TRIGGER=lock
+    # The API cancels with a cancel request, which recovers by itself after
+    # such a lock (with pgx's default it does not, even without retries), so
+    # the retry policy is the only thing that differs between rounds.
+    retry/no-retry)  TRIGGER=lock API_CANCEL_MODE=cancel_request
                      JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
     retry/retry-immediate)
-                     TRIGGER=lock LOAD_ARGS='-retry immediate -retries 3'
+                     TRIGGER=lock API_CANCEL_MODE=cancel_request LOAD_ARGS='-retry immediate -retries 3'
                      JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
     retry/retry-backoff-budget)
-                     TRIGGER=lock LOAD_ARGS='-retry backoff -retries 3 -retry-budget 0.1'
+                     TRIGGER=lock API_CANCEL_MODE=cancel_request LOAD_ARGS='-retry backoff -retries 3 -retry-budget 0.1'
                      JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
 
     # A forgotten idle transaction holds back the xmin horizon while a feed
@@ -135,11 +138,11 @@ round() {
                               "ALTER TABLE order_fills ALTER COLUMN order_id TYPE bigint"
                               "SELECT setval('orders_id_seq', $INT4_MAX - 4500)") ;;
 
-    # Half of all orders land on one account row (an omnibus account).
+    # Every order lands on one account row (an omnibus account): 180 a second.
     hotrow/baseline) MIX='account=20,positions=10,orders=10,order=60' ;;
-    hotrow/hot)      MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 50' ;;
+    hotrow/hot)      MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 100' ;;
     hotrow/hot-locklast)
-                     MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 50'
+                     MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 100'
                      API_ORDER_LOCKING=last ;;
     *) echo "unknown round $1/$2 (see: scripts/lab rounds $1)" >&2; exit 2 ;;
   esac

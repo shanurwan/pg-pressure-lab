@@ -161,7 +161,7 @@ func do(c *http.Client, base, op string, accounts int64, symbols int, hotPct flo
 	case "orders":
 		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/accounts/%d/orders", base, acct), nil)
 	case "report":
-		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/reports/accounts/%d", base, 1+rand.Int64N(max(1, accounts-1000))), nil)
+		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/reports/accounts/%d", base, 1+rand.Int64N(max(1, accounts-200))), nil)
 	case "market":
 		req, _ = http.NewRequest(http.MethodGet, base+"/v1/market/summary", nil)
 	case "activity":
