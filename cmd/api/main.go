@@ -15,6 +15,10 @@
 //	MIN_QUERY_BUDGET     do not start a query with less than this much of the
 //	                     request deadline left; answer 503 budget_exhausted
 //	                     (default 0: always start)
+//	CANCEL_MODE          what pgx does when a request's context is cancelled
+//	                     mid-query: deadline (pgx's default, closes the
+//	                     connection) or cancel_request (asks the server to
+//	                     cancel and keeps the connection if it can)
 package main
 
 import (
@@ -25,10 +29,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -82,11 +88,26 @@ func mustPool(ctx context.Context, name, url string) *pgxpool.Pool {
 	if err != nil {
 		log.Fatalf("%s: %v", name, err)
 	}
+	mode := getenv("CANCEL_MODE", "deadline")
+	switch mode {
+	case "deadline":
+		// pgx's default: on a cancelled context, set an immediate deadline on
+		// the socket. The in-flight read fails and the connection is closed,
+		// so the pool must open a new one (and PgBouncer a new server session).
+	case "cancel_request":
+		// Ask the server to cancel the query first, and keep the connection if
+		// it answers within DeadlineDelay.
+		cfg.ConnConfig.BuildContextWatcherHandler = func(c *pgconn.PgConn) ctxwatch.Handler {
+			return &pgconn.CancelRequestContextWatcherHandler{Conn: c, DeadlineDelay: time.Second}
+		}
+	default:
+		log.Fatalf("CANCEL_MODE %q: want deadline or cancel_request", mode)
+	}
 	p, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatalf("%s: %v", name, err)
 	}
-	log.Printf("%s: max %d connections", name, cfg.MaxConns)
+	log.Printf("%s: max %d connections, cancel mode %s", name, cfg.MaxConns, mode)
 	return p
 }
 
@@ -162,7 +183,12 @@ func classify(err error) *apiError {
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
 		case "57014":
-			return &apiError{http.StatusServiceUnavailable, "statement_timeout"}
+			// Same SQLSTATE for statement_timeout and for a cancel request
+			// (pgx's cancel_request mode); only the message tells them apart.
+			if strings.Contains(pgErr.Message, "statement timeout") {
+				return &apiError{http.StatusServiceUnavailable, "statement_timeout"}
+			}
+			return &apiError{http.StatusServiceUnavailable, "canceled"}
 		case "55P03":
 			return &apiError{http.StatusServiceUnavailable, "lock_timeout"}
 		case "40P01":
