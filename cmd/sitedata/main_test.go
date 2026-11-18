@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -116,5 +117,28 @@ func TestJobWindowFromEvents(t *testing.T) {
 	}
 	if got := r.Frames[1].Events; len(got) != 1 || got[0] != "migration_start" {
 		t.Fatalf("events not placed: %v", got)
+	}
+}
+
+func TestStamp(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "app.js", "console.log(1)")
+	write(t, dir, "styles.css", "body{}")
+	write(t, dir, "index.html", `<link href="styles.css?v=0"><script type="module" src="app.js?v=0"></script>`)
+	v1, err := stamp(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "index.html"))
+	if strings.Count(string(b), "?v="+v1) != 2 {
+		t.Fatalf("not every asset stamped: %s", b)
+	}
+	write(t, dir, "app.js", "console.log(2)")
+	v2, _ := stamp(dir)
+	if v2 == v1 {
+		t.Fatal("changing a script must change the version")
+	}
+	if v3, _ := stamp(dir); v3 != v2 {
+		t.Fatal("stamping twice without changes must be stable")
 	}
 }

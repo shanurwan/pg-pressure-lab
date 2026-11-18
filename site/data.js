@@ -13,7 +13,7 @@ const cache = new Map();
 export const D = {
   index: [],
   async init() {
-    const r = await fetch("data/index.json");
+    const r = await fetch("data/index.json", { cache: "no-cache" });
     if (!r.ok) throw new Error(`index: HTTP ${r.status}`);
     // Only scenarios that are listed: a scenario being re-recorded (ready:
     // false) must not count towards totals or appear in run pickers.
@@ -22,7 +22,7 @@ export const D = {
   runsOf(scenario) { return D.index.filter((r) => r.scenario === scenario); },
   async load(id) {
     if (!cache.has(id)) {
-      cache.set(id, fetch(`data/runs/${id}.json`).then((r) => {
+      cache.set(id, fetch(`data/runs/${id}.json`, { cache: "no-cache" }).then((r) => {
         if (!r.ok) throw new Error(`run ${id}: HTTP ${r.status}`);
         return r.json();
       }).then(prep));

@@ -16,7 +16,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +27,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -125,7 +128,18 @@ var readOps = []string{"account", "positions", "orders"}
 func main() {
 	results := flag.String("results", "results", "results directory")
 	out := flag.String("out", "site/data", "output directory")
+	site := flag.String("site", "site", "site directory whose index.html gets the asset version")
+	stampOnly := flag.Bool("stamp-only", false, "only re-stamp the asset version in index.html; leave the data alone")
 	flag.Parse()
+
+	if *stampOnly {
+		v, err := stamp(*site)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("stamped %s/index.html with v=%s", *site, v)
+		return
+	}
 
 	if err := os.MkdirAll(filepath.Join(*out, "runs"), 0o755); err != nil {
 		log.Fatal(err)
@@ -169,6 +183,47 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Printf("wrote %d runs", len(index))
+	if v, err := stamp(*site); err != nil {
+		log.Printf("stamp: %v", err)
+	} else {
+		log.Printf("stamped %s/index.html with v=%s", *site, v)
+	}
+}
+
+// versionRe matches the ?v=<hash> on every asset and module URL in index.html.
+var versionRe = regexp.MustCompile(`\?v=[0-9a-f]+`)
+
+// stamp sets the ?v= on every asset URL in site/index.html to a hash of the
+// site's JavaScript and CSS, so a browser can never pair a new page with old
+// cached code. Data files are fetched with cache: "no-cache" instead.
+func stamp(site string) (string, error) {
+	files, err := filepath.Glob(filepath.Join(site, "*"))
+	if err != nil {
+		return "", err
+	}
+	slices.Sort(files)
+	h := sha256.New()
+	for _, f := range files {
+		if ext := filepath.Ext(f); ext != ".js" && ext != ".css" {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00", filepath.Base(f), len(b))
+		h.Write(b)
+	}
+	v := hex.EncodeToString(h.Sum(nil))[:10]
+	idx := filepath.Join(site, "index.html")
+	b, err := os.ReadFile(idx)
+	if err != nil {
+		return "", err
+	}
+	if !versionRe.Match(b) {
+		return "", fmt.Errorf("%s has no ?v= to stamp", idx)
+	}
+	return v, os.WriteFile(idx, versionRe.ReplaceAll(b, []byte("?v="+v)), 0o644)
 }
 
 func loadRun(dir, scenario, round, stamp string) (*run, error) {
