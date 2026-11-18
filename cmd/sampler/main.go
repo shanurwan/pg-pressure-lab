@@ -29,11 +29,18 @@ SELECT count(*) FILTER (WHERE state = 'active'),
   FROM pg_stat_activity
  WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()`
 
+// sessionsSQL counts sessions ever started, and those whose client went away
+// without closing them. Their per-second change is connection churn: a pooled
+// system that is healthy starts almost no new sessions.
+const sessionsSQL = `
+SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()`
+
 type row struct {
 	pgActive, pgIdleInTx, pgLockWait, pgTotal int64
 	longestXact                               float64
 	bouncerWaiting, bouncerMaxWaitMs          int64
 	poolAcquired, poolEmptyDelta              int64
+	sessionsDelta, abandonedDelta             int64
 }
 
 func main() {
@@ -72,10 +79,11 @@ func main() {
 	defer func() { _ = f.Close() }()
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"t", "pg_active", "pg_idle_in_tx", "pg_lock_wait", "pg_total", "longest_xact_s",
-		"bouncer_cl_waiting", "bouncer_maxwait_ms", "pool_acquired", "pool_empty_acquires"})
+		"bouncer_cl_waiting", "bouncer_maxwait_ms", "pool_acquired", "pool_empty_acquires",
+		"pg_sessions_started", "pg_sessions_abandoned"})
 
 	httpc := &http.Client{Timeout: 500 * time.Millisecond}
-	var lastEmpty int64 = -1
+	var lastEmpty, lastSessions, lastAbandoned int64 = -1, -1, -1
 	tick := time.NewTicker(*every)
 	defer tick.Stop()
 	for {
@@ -83,6 +91,15 @@ func main() {
 		if err := pg.QueryRow(ctx, activitySQL).Scan(&r.pgActive, &r.pgIdleInTx, &r.pgLockWait, &r.pgTotal,
 			&r.longestXact); err != nil && ctx.Err() == nil {
 			log.Printf("pg_stat_activity: %v", err)
+		}
+		var sessions, abandoned int64
+		if err := pg.QueryRow(ctx, sessionsSQL).Scan(&sessions, &abandoned); err == nil {
+			if lastSessions >= 0 {
+				r.sessionsDelta, r.abandonedDelta = sessions-lastSessions, abandoned-lastAbandoned
+			}
+			lastSessions, lastAbandoned = sessions, abandoned
+		} else if ctx.Err() == nil {
+			log.Printf("pg_stat_database: %v", err)
 		}
 		r.bouncerWaiting, r.bouncerMaxWaitMs = bouncerPools(ctx, bouncer)
 		if acq, empty, ok := apiPool(httpc, *apiURL); ok {
@@ -95,7 +112,8 @@ func main() {
 		_ = w.Write([]string{time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 			i(r.pgActive), i(r.pgIdleInTx), i(r.pgLockWait), i(r.pgTotal),
 			strconv.FormatFloat(r.longestXact, 'f', 2, 64),
-			i(r.bouncerWaiting), i(r.bouncerMaxWaitMs), i(r.poolAcquired), i(r.poolEmptyDelta)})
+			i(r.bouncerWaiting), i(r.bouncerMaxWaitMs), i(r.poolAcquired), i(r.poolEmptyDelta),
+			i(r.sessionsDelta), i(r.abandonedDelta)})
 		w.Flush()
 		select {
 		case <-ctx.Done():
