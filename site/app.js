@@ -1,529 +1,562 @@
-// pg-pressure-lab interactive replays. Replays recorded runs from site/data, or in
-// live mode follows frames streamed from /live/events (same frame format).
-import { LESSONS, range } from "./lessons.js";
+// pg-pressure-lab interactive replays. Static: replays recorded runs from
+// site/data, or (served by `scripts/lab live`) follows the run in progress
+// over /live/events. Views: home, a scenario (?scenario=), interview practice
+// (?view=practice).
+import { SCENARIOS, SOURCES, STEPS, SIGNALS } from "./manifest.js";
+import { D, fmt, prep, totals, firstSignals, makeCtx, liveScenarios, store } from "./data.js";
 import { createScene } from "./scene.js";
+import { createChart, drawStrip } from "./chart.js";
+import { createTerminal } from "./terminal.js";
 
-const $ = (id) => document.getElementById(id);
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const store = {
-  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
-};
-const fmtN = (v) => Number(v).toLocaleString("en-US");
+const params = () => new URLSearchParams(location.search);
+const LIVE = params().has("live") || (["localhost", "127.0.0.1"].includes(location.hostname) && location.port === "58090");
 
-// ---------- theme ----------
-const savedTheme = store.get("pgpl-theme");
-if (savedTheme) document.documentElement.dataset.theme = savedTheme;
-$("theme").addEventListener("click", () => {
-  const cur = document.documentElement.dataset.theme ||
-    (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-  const next = cur === "light" ? "dark" : "light";
+// ---------------- chrome ----------------
+$("#theme").addEventListener("click", () => {
+  const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = cur === "dark" ? "light" : "dark";
   document.documentElement.dataset.theme = next;
   store.set("pgpl-theme", next);
-  drawChart();
-  scene?.setTheme();
+  chart?.draw();
 });
+$("#menu").addEventListener("click", () => {
+  const open = $("#nav-links").classList.toggle("open");
+  $("#menu").setAttribute("aria-expanded", String(open));
+});
+fetch("https://api.github.com/repos/shanurwan/pg-pressure-lab").then((r) => (r.ok ? r.json() : null)).then((j) => {
+  if (j && typeof j.stargazers_count === "number" && j.stargazers_count > 0) { const s = $("#stars"); s.textContent = `★ ${j.stargazers_count}`; s.hidden = false; }
+}).catch(() => {});
 
-// ---------- data ----------
-const cache = new Map();
-const D = {
-  index: [],
-  run: null,
-  runs(round, rate) { return this.index.filter((r) => r.round === round && (rate === undefined || r.rate === rate)); },
-  pick(round, rate = 300, preferSessions = false) {
-    let rs = this.runs(round, rate);
-    if (preferSessions) {
-      const withS = rs.filter((r) => r.headline.max_sessions_per_s !== null);
-      if (withS.length) rs = withS;
-    }
-    return rs.length ? rs[rs.length - 1].id : this.index[0]?.id;
+// ---------------- player ----------------
+const player = {
+  run: null, t: 0, playing: false, speed: 10, follow: false, fns: [],
+  on(fn) { this.fns.push(fn); },
+  emit() { const s = Math.floor(this.t); for (const fn of this.fns) fn(s, this.run); },
+  async loadRun(id, t) {
+    const r = id === "live" ? liveRun : await D.load(id);
+    this.setRun(r, t);
+    return r;
   },
-  async load(id) {
-    if (id === "live") return liveRun;
-    if (!cache.has(id)) {
-      cache.set(id, fetch(`data/runs/${id}.json`).then((r) => {
-        if (!r.ok) throw new Error(`run ${id}: HTTP ${r.status}`);
-        return r.json();
-      }).then(prepRun));
-    }
-    return cache.get(id);
+  setRun(r, t = 0) {
+    this.run = r; this.t = Math.max(0, Math.min(t, r?.maxT ?? 0)); this.follow = r?.id === "live";
+    scene?.setRun(r); chart?.setRun(r); syncRunSelect(); updateMode(); this.emit();
   },
+  seek(t) { this.t = Math.max(0, Math.min(t, this.run?.maxT ?? 0)); this.follow = false; this.emit(); },
+  play() { if (!this.run) return; if (this.t >= this.run.maxT) this.t = 0; this.playing = true; playBtn(); },
+  pause() { this.playing = false; playBtn(); },
 };
-
-function prepRun(run) {
-  run.byT = new Map(run.frames.map((f) => [f.t, f]));
-  run.maxT = run.frames.length ? run.frames[run.frames.length - 1].t : 0;
-  return run;
-}
-
-// ---------- state ----------
-const params = new URLSearchParams(location.search);
-const state = { lesson: 0, t: 0, playing: false, speed: 10, follow: true };
-let scene = null;
-let lessonExtra = null;
-let liveRun = null;
-
-function frameAt(run, t) {
-  if (!run) return null;
-  const ti = Math.floor(t);
-  if (run.byT.has(ti)) return run.byT.get(ti);
-  for (let k = ti; k >= 0; k--) if (run.byT.has(k)) return run.byT.get(k);
-  return run.frames[0] || null;
-}
-
-// ---------- hero ----------
-function renderHero() {
-  const nv = D.runs("naive", 300), ff = D.runs("naive-failfast", 300), ch = D.runs("chunked", 300);
-  const sec = (v) => `${Math.round(v)} s`;
-  $("hero-lede").innerHTML = `${D.index.length} recorded runs of a Go API on PostgreSQL. A
-    <strong>${range(nv.map((x) => x.headline.batch_seconds), sec)}</strong> end-of-day job made
-    <strong>${range(nv.map((x) => x.headline.failed_pct), (v) => v.toFixed(0) + "%")}</strong> of all requests fail,
-    and the API kept failing long after the job had committed. Replay what happened, second by second,
-    then watch two fixes: one takes failures to zero, the other brings the API back within a second.`;
-  const stats = [
-    ["bad", range(nv.map((x) => x.headline.failed_pct), (v) => v.toFixed(0) + "%"), "of all requests failed during a naive batch"],
-    ["batch", range(nv.map((x) => x.headline.failed_after_batch), fmtN), "requests failed after the batch had already finished"],
-    ["ok", range(ch.map((x) => x.headline.failed), fmtN), "failed requests with a chunked batch"],
-    ["acc", ff.length ? "≤ " + Math.ceil(Math.max(...ff.map((x) => x.headline.recovered_s ?? 99))) + " s" : "—", "to recover once the API fails fast"],
-  ];
-  $("hero-stats").innerHTML = stats.map(([c, v, l]) => `<div class="stat ${c}"><b>${v}</b><span>${l}</span></div>`).join("");
-}
-
-// ---------- lessons ----------
-function renderLessonList() {
-  const done = new Set((store.get("pgpl-done") || "").split(",").filter(Boolean).map(Number));
-  $("lesson-list").innerHTML = LESSONS.map((l, i) =>
-    `<li><button type="button" data-i="${i}" class="${done.has(i) ? "done" : ""}" ${i === state.lesson ? 'aria-current="step"' : ""}>
-      <span class="n">${String(i + 1).padStart(2, "0")}</span><span>${l.title}</span></button></li>`).join("");
-  $("progress-bar").style.width = `${(100 * done.size) / LESSONS.length}%`;
-}
-$("lesson-list").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-i]");
-  if (b) gotoLesson(Number(b.dataset.i), { scroll: true });
-});
-
-function markDone(i) {
-  const done = new Set((store.get("pgpl-done") || "").split(",").filter(Boolean).map(Number));
-  done.add(i);
-  store.set("pgpl-done", [...done].join(","));
-}
-
-async function gotoLesson(i, { runId = null, at = null, scroll = false } = {}) {
-  state.lesson = Math.max(0, Math.min(LESSONS.length - 1, i));
-  const L = LESSONS[state.lesson];
-  markDone(state.lesson);
-  renderLessonList();
-  // The lesson text always reads a recorded run, even while the view follows a live one.
-  const lessonRun = await D.load(runId && runId !== "live" ? runId : L.pick(D));
-  const id = runId || (liveRun && state.follow ? "live" : lessonRun.id);
-  D.run = lessonRun;
-  lessonExtra = L.prepare ? await L.prepare(D) : null;
-  const body = safeRender(() => L.render(D, lessonExtra));
-  const startAt = at !== null ? at : safeRender(() => L.at(D), 0);
-  await selectRun(id, { keepT: false });
-  const prev = state.lesson > 0 ? `<button class="btn ghost" type="button" data-go="${state.lesson - 1}">← ${LESSONS[state.lesson - 1].title}</button>` : "";
-  const next = state.lesson < LESSONS.length - 1 ? `<button class="btn primary" type="button" data-go="${state.lesson + 1}">Next: ${LESSONS[state.lesson + 1].title} →</button>` : "";
-  $("lesson").innerHTML = `<p class="eyebrow">Lesson ${state.lesson + 1} of ${LESSONS.length}</p>
-    <h2>${L.title}</h2>${body}<div class="lesson-nav">${prev}${next}</div>`;
-  if (D.run.id !== "live") setT(startAt);
-  renderChips(L.chips);
-  drawChart();
-  updateURL();
-  if (scroll) document.getElementById("course").scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" });
-}
-$("lesson").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-go]");
-  if (b) gotoLesson(Number(b.dataset.go), { scroll: true });
-});
-
-function safeRender(fn, fallback = "<p>This lesson needs data that is not in this build.</p>") {
-  try { return fn(); } catch (err) { console.warn(err); return fallback; }
-}
-
-// ---------- run selection ----------
-function runTitle(r) {
-  const s = r.stamp;
-  return `${r.round} · ${r.rate}/s · ${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(9, 11)}:${s.slice(11, 13)} UTC`;
-}
-function fillRunSelect() {
-  const rounds = [...new Set(D.index.map((r) => r.round))];
-  const opts = rounds.map((round) => `<optgroup label="${round}">` +
-    D.index.filter((r) => r.round === round).map((r) => `<option value="${r.id}">${runTitle(r)}</option>`).join("") + "</optgroup>");
-  if (liveRun) opts.unshift('<option value="live">Live run (streaming)</option>');
-  $("run-select").innerHTML = opts.join("");
-}
-$("run-select").addEventListener("change", async (e) => {
-  state.follow = e.target.value === "live";
-  await selectRun(e.target.value, { keepT: true });
-  drawChart();
-  updateURL();
-});
-
-async function selectRun(id, { keepT }) {
-  const run = await D.load(id);
-  D.run = run;
-  $("run-select").value = id;
-  $("scrub").max = Math.max(1, run.maxT);
-  const live = id === "live";
-  $("mode-badge").textContent = live ? "LIVE" : "REPLAY";
-  $("mode-badge").classList.toggle("live", live);
-  $("run-desc").textContent = live
-    ? `following your run${run.meta?.round ? ` · ${run.meta.round}` : ""}`
-    : `replay of a recorded run on ${run.date} · ${run.round} · ${run.meta.rate} req/s`;
-  scene?.setRun(run);
-  if (!keepT) setT(0); else setT(Math.min(state.t, run.maxT));
-}
-
-// ---------- time ----------
-function setT(t) {
-  state.t = Math.max(0, Math.min(t, D.run?.maxT ?? 0));
-  $("scrub").value = Math.floor(state.t);
-  $("clock").textContent = `${Math.floor(state.t)} s`;
-  const f = frameAt(D.run, state.t);
-  renderHud(f);
-  scene?.setFrame(f, state.t);
-  drawChart();
-}
-$("scrub").addEventListener("input", (e) => { state.follow = false; setT(Number(e.target.value)); });
-$("speed").addEventListener("change", (e) => { state.speed = Number(e.target.value); });
-$("play").addEventListener("click", () => togglePlay());
-function togglePlay(force) {
-  state.playing = force ?? !state.playing;
-  if (state.playing && state.t >= D.run.maxT && D.run.id !== "live") setT(0);
-  $("play").textContent = state.playing ? "❚❚" : "▶";
-  $("play").setAttribute("aria-label", state.playing ? "Pause" : "Play");
-  if (!state.playing) updateURL();
-}
-let lastTs = null;
-function tick(ts) {
-  if (lastTs !== null && state.playing && D.run && D.run.id !== "live") {
-    const prev = state.t;
-    const next = Math.min(D.run.maxT, state.t + ((ts - lastTs) / 1000) * state.speed);
-    setT(next);
-    term.onAdvance(prev, next);
-    if (next >= D.run.maxT) { togglePlay(false); term.onEnd(); }
+let lastTick = performance.now();
+function tick(now) {
+  const dt = Math.min(0.1, (now - lastTick) / 1000); lastTick = now;
+  if (player.playing && player.run && !player.follow) {
+    const before = Math.floor(player.t);
+    player.t += dt * player.speed;
+    if (player.t >= player.run.maxT) { player.t = player.run.maxT; if (player.run.id !== "live") player.pause(); }
+    if (Math.floor(player.t) !== before) player.emit();
   }
-  lastTs = ts;
   requestAnimationFrame(tick);
 }
+requestAnimationFrame(tick);
 
-// ---------- HUD ----------
-function renderHud(f) {
-  if (!f) { $("hud").innerHTML = ""; return; }
-  let n = 0, ok = 0, p99 = 0;
-  for (const o of Object.values(f.ops)) { n += o.n; ok += o.ok; p99 = Math.max(p99, o.p99); }
-  const r = n ? (100 * ok) / n : 100;
-  const bw = D.run.batch_window;
-  const inBatch = bw && f.t >= Math.floor(bw.start_s) && f.t < Math.ceil(bw.end_s);
-  const afterBatch = bw && f.t >= Math.ceil(bw.end_s);
-  $("hud").innerHTML = `<span>t = ${f.t} s ${inBatch ? '<span class="batchc">· batch running</span>' : afterBatch ? '<span class="m">· batch finished</span>' : ""}</span>
-    <span class="big ${r >= 99 ? "okc" : "badc"}">${r.toFixed(1)}% ok</span>
-    <span>${fmtN(n)} req this second · p99 ${Math.round(p99)} ms</span>`;
+// ---------------- workspace ----------------
+const ws = $("#workspace-tpl").content.firstElementChild.cloneNode(true);
+let scene = null, chart = null, term = null;
+const playIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg>';
+const pauseIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
+function playBtn() { const b = $("#ws-play", ws); b.innerHTML = player.playing ? pauseIcon : playIcon; b.setAttribute("aria-label", player.playing ? "Pause" : "Play"); }
+
+function setTab(name) {
+  for (const b of $$(".tabs button", ws)) b.setAttribute("aria-selected", String(b.dataset.tab === name));
+  for (const p of $$(".pane", ws)) p.hidden = p.dataset.pane !== name;
+  if (name === "timeline") chart?.draw();
+  if (name === "3d") scene?.resize();
 }
-
-// ---------- chart ----------
-const SIG = {
-  ok: { label: "Requests succeeded (bars)", color: "--ok" },
-  p99_order: { label: "Order p99 (ms)", color: "--accent-2", get: (f) => f.ops.order?.p99 ?? null },
-  longest_xact_s: { label: "Oldest open transaction (s)", color: "--batch", get: (f) => f.db?.longest_xact_s ?? null },
-  pg_lock_wait: { label: "Backends waiting on a lock", color: "--bad", get: (f) => f.db?.pg_lock_wait ?? null },
-  pool_acquired: { label: "App pool in use (of 40)", color: "--accent", get: (f) => f.db?.pool_acquired ?? null },
-  bouncer_cl_waiting: { label: "Queued in PgBouncer", color: "--shed", get: (f) => f.db?.bouncer_cl_waiting ?? null },
-  pool_empty_acquires: { label: "Waits for a pool connection /s", color: "--shed", get: (f) => f.db?.pool_empty_acquires ?? null },
-  pg_sessions_started: { label: "New PostgreSQL sessions /s", color: "--accent-2", get: (f) => f.db?.pg_sessions_started ?? null },
-};
-const cssVar = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-
-function drawChart() {
-  const run = D.run, c = $("chart");
-  if (!run) return;
-  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
-  c.width = w * dpr; c.height = h * dpr;
-  const g = c.getContext("2d");
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, w, h);
-  const maxT = Math.max(1, run.maxT), pad = 4, bw = Math.max(1, (w - 2 * pad) / (maxT + 1));
-  const x = (t) => pad + (t / (maxT + 1)) * (w - 2 * pad);
-  if (run.batch_window) {
-    g.fillStyle = cssVar("--batch") + "26";
-    g.fillRect(x(run.batch_window.start_s), 0, x(run.batch_window.end_s) - x(run.batch_window.start_s), h);
-  }
-  const okC = cssVar("--ok"), badC = cssVar("--bad");
-  for (const f of run.frames) {
-    let n = 0, ok = 0;
-    for (const o of Object.values(f.ops)) { n += o.n; ok += o.ok; }
-    if (!n) continue;
-    const hOk = (h - 8) * (ok / n);
-    g.fillStyle = okC + "55"; g.fillRect(x(f.t), h - hOk, bw, hOk);
-    if (ok < n) { g.fillStyle = badC + "cc"; g.fillRect(x(f.t), 0, bw, h - 8 - hOk + 8); }
-  }
-  const lesson = LESSONS[state.lesson];
-  const keys = (lesson?.chart || ["ok"]).filter((k) => k !== "ok");
-  const keyHtml = ['<span><i style="background:' + okC + '"></i>succeeded / <i style="background:' + badC + '"></i>failed, per second</span>'];
-  for (const k of keys) {
-    const s = SIG[k];
-    const vals = run.frames.map((f) => [f.t, s.get(f)]).filter(([, v]) => v !== null);
-    if (!vals.length) continue;
-    const mx = Math.max(1e-9, ...vals.map(([, v]) => v));
-    g.strokeStyle = cssVar(s.color); g.lineWidth = 2; g.beginPath();
-    vals.forEach(([t, v], i) => { const yy = h - 6 - (h - 14) * (v / mx); i ? g.lineTo(x(t) + bw / 2, yy) : g.moveTo(x(t) + bw / 2, yy); });
-    g.stroke();
-    keyHtml.push(`<span><i style="background:${cssVar(s.color)}"></i>${s.label} · max ${Math.round(mx * 10) / 10}</span>`);
-  }
-  if (run.batch_window) keyHtml.push(`<span><i style="background:${cssVar("--batch")}66"></i>batch running</span>`);
-  g.fillStyle = cssVar("--faint"); g.font = "10px JetBrains Mono, monospace";
-  for (let t = 30; t < maxT; t += 30) g.fillText(`${t}s`, x(t) + 2, h - 1);
-  g.strokeStyle = cssVar("--text"); g.lineWidth = 1.5; g.beginPath();
-  g.moveTo(x(state.t) + bw / 2, 0); g.lineTo(x(state.t) + bw / 2, h); g.stroke();
-  $("chart-key").innerHTML = keyHtml.join("");
-}
-$("chart").addEventListener("click", (e) => {
-  const r = e.target.getBoundingClientRect();
-  state.follow = false;
-  setT(((e.clientX - r.left) / r.width) * (D.run.maxT + 1));
+for (const b of $$(".tabs button", ws)) b.addEventListener("click", () => setTab(b.dataset.tab));
+$("#ws-play", ws).addEventListener("click", () => (player.playing ? player.pause() : player.play()));
+$("#ws-range", ws).addEventListener("input", (e) => player.seek(Number(e.target.value)));
+$("#ws-speed", ws).addEventListener("change", (e) => (player.speed = Number(e.target.value)));
+$("#ws-run", ws).addEventListener("change", async (e) => {
+  const id = e.target.value;
+  await player.loadRun(id, player.run?.batch_window ? Math.max(0, player.run.batch_window.start_s - 3) : 0);
+  const p = params(); if (id !== "live") { p.set("run", id); history.replaceState(null, "", `?${p}`); }
 });
-addEventListener("resize", () => { drawChart(); scene?.resize(); });
 
-// ---------- terminal ----------
-const out = $("term-out");
-function print(html = "", cls = "") {
-  const div = document.createElement("div");
-  if (cls) div.className = cls;
-  div.innerHTML = html;
-  out.appendChild(div);
-  while (out.childNodes.length > 400) out.removeChild(out.firstChild);
-  out.scrollTop = out.scrollHeight;
+let runScope = "batch";
+function syncRunSelect() {
+  const sel = $("#ws-run", ws);
+  const list = D.index.filter((r) => r.scenario === (player.run?.scenario || runScope));
+  const opts = list.map((r) => `<option value="${r.id}">${esc(r.round)} · ${r.rate}/s · ${r.stamp.slice(9, 11)}:${r.stamp.slice(11, 13)} UTC${r.headline.failed_pct ? ` · ${fmt.pct(r.headline.failed_pct)} failed` : ""}</option>`);
+  if (liveRun) opts.unshift(`<option value="live">LIVE · ${esc(liveRun.scenario || "")} ${esc(liveRun.round || "")}</option>`);
+  sel.innerHTML = opts.join("");
+  if (player.run) sel.value = player.run.id;
 }
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-
-const term = {
-  session: false,
-  onAdvance(prev, next) {
-    if (!this.session) return;
-    const run = D.run;
-    for (let t = Math.floor(prev) + 1; t <= Math.floor(next); t++) {
-      const f = run.byT.get(t);
-      if (!f) continue;
-      for (const ev of f.events || []) {
-        if (ev === "batch_start") print(`<span class="o">[${t}s] batch started: ${esc(run.meta.batch_args.split(" -dsn")[0])}</span>`);
-        if (ev === "batch_end") print(`<span class="o">[${t}s] batch committed after ${run.headline.batch_seconds} s</span>`);
-      }
-      if (t % 10 === 0) {
-        let n = 0, ok = 0; const errs = {};
-        for (const o of Object.values(f.ops)) { n += o.n; ok += o.ok; for (const [k, v] of Object.entries(o.errors)) errs[k] = (errs[k] || 0) + v; }
-        const r = n ? (100 * ok) / n : 100;
-        const db = f.db ? ` lock_wait=${f.db.pg_lock_wait} queue=${f.db.bouncer_cl_waiting} pool=${f.db.pool_acquired}/40` : "";
-        const e = Object.keys(errs).length ? " " + Object.entries(errs).map(([k, v]) => `${k}:${v}`).join(" ") : "";
-        print(`<span class="m">[${String(t).padStart(3)}s]</span> <span class="${r >= 99 ? "g" : "r"}">ok ${r.toFixed(1).padStart(5)}%</span>${db}<span class="r">${e}</span>`);
-      }
-    }
-  },
-  onEnd() {
-    if (!this.session) return;
-    this.session = false;
-    const run = D.run, ops = run.summary.ops;
-    for (const op of Object.keys(ops).sort()) {
-      const s = ops[op];
-      const errs = Object.entries(s.errors || {}).map(([k, v]) => `${k}:${v}`).join(" ");
-      print(`${op.padEnd(9)} n=${String(s.n).padEnd(6)} ok=${s.ok_ratio.toFixed(4)} p50=${String(s.p50_ms).padEnd(7)} p99=${String(s.p99_ms).padEnd(7)} max=${String(s.max_ms).padEnd(7)} errors=map[${esc(errs)}]`, s.ok_ratio < 0.99 ? "r" : "");
-    }
-    print(`results: results/${run.scenario}/${run.round}/${run.stamp}`, "c");
-    print("(from the recorded summary.json of this run)", "m");
-  },
-};
-
-const HELP = [
-  ["lab rounds batch", "list the rounds of the batch scenario"],
-  ["lab run batch &lt;round&gt; [--rate 150]", "replay a recorded run of that round"],
-  ["lab report batch", "every recorded run, side by side"],
-  ["lab runs", "list recorded runs"],
-  ["lab top", "top statements (pg_stat_statements) of the current run"],
-  ["lesson &lt;n&gt;", "jump to a lesson"],
-  ["clear", "clear the screen"],
-];
-
-async function runCommand(raw) {
-  const line = raw.trim();
-  if (!line) return;
-  print(`<span class="c">$</span> ${esc(line)}`);
-  const [cmd, ...args] = line.split(/\s+/);
-  const a = cmd === "lab" || cmd === "scripts/lab" ? args : [cmd, ...args];
-  const opt = (name) => { const i = a.indexOf(name); return i >= 0 ? a[i + 1] : null; };
-  switch (a[0]) {
-    case "help": case "?":
-      print("Everything here replays recorded files from results/. Commands:", "m");
-      HELP.forEach(([c, d]) => print(`  <span class="c">${c.padEnd(34)}</span> <span class="m">${d}</span>`));
-      return;
-    case "clear": out.innerHTML = ""; return;
-    case "lesson": return gotoLesson(Number(a[1]) - 1, { scroll: false });
-    case "rounds": {
-      const rounds = [...new Set(D.index.filter((r) => r.scenario === (a[1] || "batch")).map((r) => r.round))];
-      rounds.forEach((r) => print(r));
-      return;
-    }
-    case "runs":
-      D.index.forEach((r) => print(`${r.id.padEnd(40)} <span class="m">${r.rate}/s failed ${r.headline.failed_pct}%</span>`));
-      return;
-    case "report": {
-      print(`<span class="b">${"round".padEnd(16)}${"rate".padStart(6)}${"failed".padStart(10)}${"after batch".padStart(13)}${"recovered".padStart(12)}${"batch".padStart(8)}</span>`);
-      for (const r of D.index.filter((x) => x.scenario === (a[1] || "batch"))) {
-        const h = r.headline;
-        const rec = h.batch_seconds === null ? "-" : h.recovered_s === null ? "never" : h.recovered_s + " s";
-        print(`${r.round.padEnd(16)}${String(r.rate).padStart(6)}${(h.failed_pct + "%").padStart(10)}${String(h.failed_after_batch ?? "-").padStart(13)}${rec.padStart(12)}${(h.batch_seconds === null ? "-" : Math.round(h.batch_seconds) + " s").padStart(8)}`, h.failed_pct > 1 ? "r" : "g");
-      }
-      return;
-    }
-    case "top": {
-      for (const s of (D.run.top_statements || []).slice(0, 8))
-        print(`${String(s.calls).padStart(6)} calls ${String(Math.round(s.total_ms)).padStart(7)} ms total  <span class="m">${esc(s.query.slice(0, 90))}</span>`);
-      return;
-    }
-    case "run": {
-      const scenario = a[1], round = a[2];
-      if (!scenario || !round) { print("usage: lab run batch &lt;round&gt; [--rate 150]", "y"); return; }
-      const rate = Number(opt("--rate") || 300);
-      const id = D.pick(round, rate, true);
-      const r = D.index.find((x) => x.id === id && x.round === round && x.scenario === scenario);
-      if (!r) { print(`no recorded run for ${esc(scenario)}/${esc(round)} at ${rate}/s. Try: lab rounds batch`, "y"); return; }
-      state.follow = false;
-      await selectRun(id, { keepT: false });
-      drawChart(); updateURL();
-      const m = D.run.meta;
-      print(`replaying ${r.id} (recorded ${D.run.date})`, "m");
-      print(`sending ${m.rate} req/s for ${m.duration}, mix ${esc(m.mix)}`);
-      if (m.batch_args) print(`batch at +${m.batch_at_s}s: ${esc(m.batch_args.split(" -dsn")[0])}`, "o");
-      if (m.api_acquire_timeout && m.api_acquire_timeout !== "0") print(`api: acquire timeout ${m.api_acquire_timeout}, min query budget ${m.api_min_query_budget}`, "b");
-      term.session = true;
-      togglePlay(true);
-      return;
-    }
-    default:
-      print(`unknown command: ${esc(line)}. Type <span class="c">help</span>.`, "y");
-  }
+function updateMode() {
+  const r = player.run;
+  $("#ws-badge", ws).textContent = r?.id === "live" ? "LIVE" : "REPLAY";
+  $("#ws-badge", ws).classList.toggle("live", r?.id === "live");
+  $("#ws-mode", ws).textContent = r ? (r.id === "live" ? `${r.scenario || ""} · ${r.round || ""} · following your run` : `${r.date} · ${r.scenario}/${r.round} · ${r.meta?.rate ?? ""} req/s`) : "";
+  const range = $("#ws-range", ws); range.max = String(r?.maxT ?? 0);
 }
-$("term-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const v = $("term-input").value;
-  $("term-input").value = "";
-  runCommand(v);
+
+player.on((t, r) => {
+  if (!r) return;
+  const f = r.byT.get(t);
+  scene?.setFrame(f, t);
+  chart?.setT(t);
+  drawStrip($("#ws-strip", ws), r, t);
+  $("#ws-range", ws).value = String(t);
+  $("#ws-time", ws).textContent = `${t} / ${r.maxT} s`;
+  const tt = totals(f);
+  const okp = tt.n ? (tt.ok / tt.n) * 100 : 100;
+  const p99 = Math.max(0, ...Object.values(f?.ops || {}).map((o) => o.p99 || 0));
+  const w = r.batch_window;
+  const state = w ? (t < w.start_s ? `${r.job || "job"} starts at ${Math.round(w.start_s)} s` : t < w.end_s ? `<span class="job">${r.job || "job"} running · ${Math.round(t - w.start_s)} s</span>` : `${r.job || "job"} finished at ${Math.round(w.end_s)} s`) : "no job";
+  $("#ws-hud", ws).innerHTML = `t = ${t} s · ${state}<div class="big ${okp < 99 ? "bad" : ""}">${okp.toFixed(1)}% ok</div>${tt.n} req this second · p99 ${fmt.ms(p99)}`;
 });
-function renderChips(chips) {
-  $("chips").innerHTML = (chips || []).map((c) => `<button type="button" class="chip">${c}</button>`).join("");
-}
-$("chips").addEventListener("click", (e) => {
-  const b = e.target.closest(".chip");
-  if (!b) return;
-  typeCommand(b.textContent);
-});
-function typeCommand(cmd) {
-  const input = $("term-input");
-  if (reduceMotion) { runCommand(cmd); return; }
-  let i = 0;
-  input.value = "";
-  const step = () => {
-    input.value = cmd.slice(0, ++i);
-    if (i < cmd.length) setTimeout(step, 28);
-    else setTimeout(() => { input.value = ""; runCommand(cmd); }, 160);
-  };
-  step();
-}
 
-// ---------- deep links ----------
-function updateURL() {
-  if (!D.run) return;
-  const p = new URLSearchParams();
-  p.set("lesson", state.lesson + 1);
-  if (D.run.id !== "live") { p.set("run", D.run.id); p.set("at", Math.floor(state.t)); }
-  if (params.has("live")) p.set("live", "1");
-  history.replaceState(null, "", `${location.pathname}?${p}${location.hash}`);
-}
-$("share").addEventListener("click", async () => {
-  updateURL();
-  try { await navigator.clipboard.writeText(location.href); toast("Link to this moment copied"); }
-  catch { toast(location.href); }
-});
-function toast(msg) {
-  const d = document.createElement("div");
-  d.className = "toast"; d.textContent = msg;
-  document.body.appendChild(d);
-  setTimeout(() => d.remove(), 2200);
-}
-
-// ---------- copy buttons on code blocks ----------
-document.querySelectorAll(".dev pre").forEach((pre) => {
-  const b = document.createElement("button");
-  b.className = "copy"; b.type = "button"; b.textContent = "copy";
-  b.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(pre.innerText.replace(/^copy$/m, "").trim()); b.textContent = "copied"; }
-    catch { b.textContent = "select + copy"; }
-    setTimeout(() => (b.textContent = "copy"), 1400);
+async function initWorkspace() {
+  chart = createChart($("#ws-chart", ws), $("#ws-keys", ws), $("#ws-readout", ws));
+  new ResizeObserver(() => { if (player.run) drawStrip($("#ws-strip", ws), player.run, Math.floor(player.t)); }).observe($("#ws-strip", ws));
+  term = createTerminal($("#ws-term", ws), { player, onOpenScenario: (id) => go(`?scenario=${encodeURIComponent(id)}`) });
+  // mount before creating the scene so the canvas has a size
+  document.body.appendChild(ws); ws.style.display = "none";
+  createScene($("#ws-canvas", ws), $("#ws-labels", ws), {
+    reduceMotion, onLost: (lost) => { $("#ws-nogl", ws).hidden = !lost; },
+  }).then((s) => {
+    scene = s;
+    if (!s) $("#ws-nogl", ws).hidden = false;
+    else if (player.run) { s.setRun(player.run); s.setFrame(player.run.byT.get(Math.floor(player.t)), Math.floor(player.t)); }
   });
-  pre.appendChild(b);
-});
-
-// ---------- live mode ----------
-function wantLive() {
-  return params.get("live") === "1" || (["localhost", "127.0.0.1"].includes(location.hostname) && location.port === "58090");
 }
+function mountWorkspace(slot) { if (!slot) return; slot.appendChild(ws); ws.style.display = ""; scene?.resize(); chart?.draw(); }
+
+// ---------------- live mode ----------------
+let liveRun = null;
 function startLive() {
-  liveRun = prepRun({ id: "live", scenario: "live", round: "live", meta: {}, summary: { ops: {} }, headline: {}, batch_window: null, frames: [], top_statements: [], date: "" });
   const es = new EventSource("/live/events");
-  const onMeta = (e) => {
-    try {
-      const m = JSON.parse(e.data);
-      liveRun.meta = { ...liveRun.meta, ...m };
-      if (D.run === liveRun) $("run-desc").textContent = `following your run${m.round ? ` · ${m.round}` : ""}`;
-      print(`live: ${esc(e.data)}`, "b");
-    } catch { /* ignore */ }
+  const newRun = (meta) => {
+    liveRun = prep({ id: "live", scenario: meta.scenario || meta.meta?.scenario || "", round: meta.round || meta.meta?.round || "", meta: meta.meta || {}, frames: [], batch_window: null, job: "", headline: {}, summary: null, date: "live" });
+    player.setRun(liveRun, 0); player.follow = true; player.playing = true;
   };
-  es.addEventListener("meta", onMeta);
-  es.addEventListener("run", onMeta);
-  es.onopen = () => { $("mode-badge").textContent = "LIVE"; print("connected to /live/events", "g"); };
-  es.onerror = () => { $("mode-badge").textContent = "LIVE · reconnecting"; };
-  es.onmessage = (e) => {
-    let f;
-    try { f = JSON.parse(e.data); } catch { return; }
-    if (typeof f.t !== "number" || !f.ops) { onMeta(e); return; }
-    f.events = f.events || [];
-    if (liveRun.frames.length && f.t < liveRun.maxT) { // a new run started
-      liveRun.frames = []; liveRun.batch_window = null; liveRun.byT = new Map();
-      print("live: new run", "b");
+  es.addEventListener("run", (e) => { try { newRun(JSON.parse(e.data)); } catch { /* ignore */ } });
+  es.addEventListener("frame", (e) => {
+    let f; try { f = JSON.parse(e.data); } catch { return; }
+    if (!liveRun || (liveRun.frames.length && f.t < liveRun.maxT)) newRun({});
+    liveRun.frames.push(f); liveRun.byT.set(f.t, f); liveRun.maxT = f.t;
+    for (const ev of f.events || []) {
+      if (ev.endsWith("_start")) { liveRun.job = ev.slice(0, -6); liveRun.batch_window = { start_s: f.t, end_s: f.t + 0.5 }; liveRun.open = true; }
+      if (ev.endsWith("_end") && liveRun.batch_window) { liveRun.batch_window.end_s = f.t; liveRun.open = false; }
     }
-    liveRun.frames.push(f);
-    liveRun.byT.set(f.t, f);
-    liveRun.maxT = f.t;
-    if (f.events.includes("batch_start")) liveRun.batch_window = { start_s: f.t, end_s: f.t };
-    if (liveRun.batch_window && !liveRun.frames.some((x) => x.events.includes("batch_end"))) liveRun.batch_window.end_s = f.t;
-    for (const ev of f.events) print(`<span class="o">[${f.t}s] ${ev.replace("_", " ")}</span>`);
-    if (D.run === liveRun) {
-      $("scrub").max = Math.max(1, liveRun.maxT);
-      if (state.follow) setT(f.t); else drawChart();
-    }
-  };
+    if (liveRun.open && liveRun.batch_window) liveRun.batch_window.end_s = f.t + 0.5;
+    if (player.run === liveRun) { chart?.setRun(liveRun); if (player.follow) { player.t = f.t; player.emit(); } }
+    updateMode();
+  });
+  es.onerror = () => { $("#ws-mode", ws).textContent = "live stream unavailable — start it with scripts/lab live"; };
 }
 
-// ---------- boot ----------
-async function boot() {
-  try {
-    const idx = await fetch("data/index.json").then((r) => r.json());
-    D.index = idx.runs;
-  } catch (err) {
-    $("hero-lede").textContent = "Could not load the recorded runs (data/index.json).";
-    console.error(err);
+// ---------------- signals ----------------
+const sigCache = new Map();
+async function signalsFor(sc) {
+  if (sigCache.has(sc.id)) return sigCache.get(sc.id);
+  const p = (async () => {
+    const rs = D.runsOf(sc.id);
+    const rate = Math.max(...rs.map((r) => r.rate));
+    const prim = primaryRound(sc);
+    const ids = rs.filter((r) => r.round === prim && r.rate === rate).map((r) => r.id);
+    const runs = await Promise.all(ids.map((id) => D.load(id)));
+    return runs.map((r) => {
+      const keys = new Set(Object.keys(SIGNALS));
+      for (const f of r.frames) if (f.db) for (const k of Object.keys(f.db)) keys.add(k);
+      keys.delete("pg_sessions_abandoned"); keys.delete("pg_total"); keys.delete("bouncer_maxwait_ms");
+      return firstSignals(r, [...keys]);
+    }).filter(Boolean);
+  })();
+  sigCache.set(sc.id, p);
+  return p;
+}
+function primaryRound(sc) {
+  const rs = D.runsOf(sc.id);
+  if (rs.some((r) => r.round === sc.primary)) return sc.primary;
+  return rs.slice().sort((a, b) => b.headline.failed_pct - a.headline.failed_pct)[0]?.round;
+}
+function bestRun(sc, round) {
+  const rs = D.runsOf(sc.id).filter((r) => r.round === round);
+  const rate = Math.max(...rs.map((r) => r.rate));
+  const at = rs.filter((r) => r.rate === rate);
+  return (at.filter((r) => r.headline.max_sessions_per_s !== null).at(-1) || at.at(-1))?.id;
+}
+
+// ---------------- router ----------------
+function go(href) { history.pushState(null, "", href); render(); }
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("a");
+  if (!a || a.target === "_blank" || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  const url = new URL(a.href, location.href);
+  if (url.origin !== location.origin || url.pathname !== location.pathname) return;
+  if (url.search === location.search && url.hash) return; // in-page anchor
+  e.preventDefault();
+  history.pushState(null, "", url.search + url.hash || "./");
+  render().then(() => { if (url.hash) document.getElementById(url.hash.slice(1))?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" }); else window.scrollTo(0, 0); });
+  $("#nav-links").classList.remove("open");
+});
+addEventListener("popstate", () => render());
+
+function setNav(name) {
+  for (const a of $$("[data-nav]")) {
+    if (a.dataset.nav === name) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  }
+}
+
+async function render() {
+  const p = params();
+  const view = $("#view");
+  if (p.get("view") === "practice") { setNav("practice"); await renderPractice(view, p); }
+  else if (p.get("scenario")) { setNav(""); await renderScenario(view, p); }
+  else { setNav(""); await renderHome(view); }
+  document.title = p.get("scenario") ? `${SCENARIOS.find((s) => s.id === p.get("scenario"))?.short || "Scenario"} · pg-pressure-lab` : p.get("view") === "practice" ? "Interview practice · pg-pressure-lab" : "pg-pressure-lab · Real PostgreSQL incidents, replayed";
+}
+
+// ---------------- home ----------------
+async function renderHome(view) {
+  const scs = liveScenarios();
+  const batch = SCENARIOS.find((s) => s.id === "batch");
+  const ctx = makeCtx(batch, await signalsFor(batch).catch(() => []));
+  const totalReq = D.index.reduce((a, r) => a + r.headline.requests, 0);
+  const kpis = [
+    [ctx.range("naive", "failed_pct", fmt.pct), "bad", "of all requests failed when the end-of-day job ran as one transaction"],
+    [ctx.range("naive", "failed_after_batch", fmt.n), "bad", "requests failed after the job had already finished"],
+    [ctx.range("chunked", "failed_pct", fmt.pct), "ok", "failed once the job used short transactions"],
+    [ctx.range("naive-cancelreq", "failed_pct", fmt.pct), "", "failed with the job unchanged and one pgx setting changed"],
+  ].filter((k) => k[0]);
+  view.innerHTML = `
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow">Interactive replays · PostgreSQL · PgBouncer · Go</span>
+        <h1>Real PostgreSQL incidents, <span class="hl">replayed second by second.</span></h1>
+        <p class="lede">Each scenario starts from a public postmortem, reproduces the failure on a real Go + PgBouncer + PostgreSQL stack under load, and measures every fix. Watch which signal moved first, then practise explaining it.</p>
+        <div class="ctas">
+          <a class="btn primary" href="?scenario=batch">Start with the batch outage <span aria-hidden="true">→</span></a>
+          <a class="btn" href="?view=practice">Interview practice</a>
+        </div>
+        <div class="proof">
+          <span><i class="dot ok"></i>${D.index.length} recorded runs</span>
+          <span><i class="dot wait"></i>${fmt.n(totalReq)} requests replayed</span>
+          <span><i class="dot job"></i>${scs.length} ${scs.length === 1 ? "scenario" : "scenarios"}</span>
+          <span><i class="dot busy"></i>open source</span>
+        </div>
+      </div>
+      <div class="ws-slot"></div>
+    </div>
+    <div class="wrap"><div class="kpis" style="margin-top:40px">${kpis.map(([v, c, l]) => `<div class="kpi"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join("")}</div></div>
+  </section>
+
+  <section class="block alt" id="scenarios">
+    <div class="wrap">
+      <div class="section-head"><div><span class="eyebrow">Scenarios</span><h2 style="margin-top:10px">Failures that happened to real teams</h2><p>Every scenario links the public incident it is based on. The lab reproduces the class of failure on its own stack; it does not claim to know anyone's internals.</p></div></div>
+      <div class="cards ${scs.length === 1 ? "one" : ""}">${scs.map(card).join("")}</div>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="wrap">
+      <div class="section-head"><div><span class="eyebrow">How it works</span><h2 style="margin-top:10px">Learn it the way you'd debug it</h2></div></div>
+      <div class="features">
+        <div class="feature"><div class="ic">01</div><h3>Reproduce</h3><p>Open-loop load keeps arriving whether or not the API keeps up, the way customers do. Every second of every run is recorded: callers, the app's pool, PgBouncer and PostgreSQL.</p></div>
+        <div class="feature"><div class="ic">02</div><h3>Diagnose and fix</h3><p>Replay a run in 3D, on a timeline or from a terminal. Each fix is one change from the failing round, measured at least twice.</p></div>
+        <div class="feature"><div class="ic">03</div><h3>Practise</h3><p>Interview questions for every scenario, with a timer, model answers built from the measured numbers, and spaced repetition so you remember them.</p></div>
+      </div>
+    </div>
+  </section>
+
+  ${devSection()}`;
+  mountWorkspace($(".ws-slot", view));
+  runScope = "batch";
+  const id = params().get("run") || bestRun(batch, "naive");
+  if (!player.run || player.run.scenario !== "batch" || params().get("run")) {
+    const r = await player.loadRun(id, Number(params().get("at")) || 0);
+    const w = r.batch_window;
+    if (!params().get("at") && w) player.seek(Math.max(0, w.start_s - 4));
+  }
+  setTab("3d");
+  term?.setChips(["lab run batch naive", "lab run batch chunked", "lab report batch", "help"]);
+  if (!reduceMotion && !player.playing) { player.speed = 8; $("#ws-speed", ws).value = "10"; player.play(); }
+  wireCopy(view);
+}
+
+function card(sc) {
+  const ctx = makeCtx(sc, null);
+  const prim = primaryRound(sc);
+  const f = ctx.range(prim, "failed_pct", fmt.pct);
+  const done = (store.get("pgpl-steps", {})[sc.id] || []).length;
+  return `<article class="card link">
+    <div class="top"><span class="chip accent">${esc(sc.short)}</span>${f ? `<span class="chip bad">${f} failed</span>` : ""}<span class="chip">${sc.minutes} min</span></div>
+    <h3><a href="?scenario=${sc.id}">${esc(sc.title)}</a></h3>
+    <p class="desc">${esc(sc.summary)}</p>
+    <ul>${sc.practise.slice(0, 3).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+    <div class="sources">${sc.sources.map((k) => SOURCES[k]).map((s) => `<a href="${s.url}" target="_blank" rel="noopener">${esc(s.org)} · ${esc(s.date)} <span aria-hidden="true">↗</span></a><p class="src-sum">${esc(s.title)}</p>`).join("")}</div>
+    <div class="foot"><span>${D.runsOf(sc.id).length} recorded runs</span><span class="progress"><span class="ring" style="--p:${Math.round((done / STEPS.length) * 100)}"></span>${done}/${STEPS.length}</span></div>
+  </article>`;
+}
+
+// ---------------- scenario ----------------
+async function renderScenario(view, p) {
+  const sc = SCENARIOS.find((s) => s.id === p.get("scenario"));
+  if (!sc || !D.runsOf(sc.id).length || !sc.ready) {
+    view.innerHTML = `<div class="wrap" style="padding:80px 0"><h1>Scenario not found</h1><p class="muted">It may not have recorded runs yet. <a href="./#scenarios">See all scenarios</a>.</p></div>`;
     return;
   }
-  if (wantLive()) startLive();
-  renderHero();
-  fillRunSelect();
-  try { scene = await createScene($("scene"), $("labels"), { reduceMotion }); }
-  catch (err) { console.warn("3D disabled:", err.message); scene = null; }
-  if (!scene) $("nogl").hidden = false;
-  const lesson = Math.max(1, Math.min(LESSONS.length, Number(params.get("lesson")) || 1)) - 1;
-  const runId = params.get("run");
-  const known = runId && D.index.some((r) => r.id === runId);
-  await gotoLesson(lesson, { runId: liveRun ? "live" : known ? runId : null, at: params.has("at") ? Number(params.get("at")) : null });
-  print('Welcome. This terminal replays recorded runs. Type <span class="c">help</span>, or click a suggestion below.', "m");
-  if (!reduceMotion && !params.has("at") && !liveRun) togglePlay(true);
-  requestAnimationFrame(tick);
+  const stepId = STEPS.some((s) => s.id === p.get("step")) ? p.get("step") : "incident";
+  const sig = await signalsFor(sc).catch(() => []);
+  const ctx = makeCtx(sc, sig);
+  const doneAll = store.get("pgpl-steps", {});
+  const done = new Set(doneAll[sc.id] || []);
+  done.add(stepId); doneAll[sc.id] = [...done]; store.set("pgpl-steps", doneAll);
+  const idx = STEPS.findIndex((s) => s.id === stepId);
+  const prev = STEPS[idx - 1], next = STEPS[idx + 1];
+  const prim = primaryRound(sc);
+
+  view.innerHTML = `
+  <div class="wrap">
+    <div class="crumbs"><a href="./#scenarios">Scenarios</a><span>/</span><span>${esc(sc.short)}</span></div>
+    <div class="sc-head">
+      <span class="eyebrow">${esc(sc.short)}</span>
+      <h1>${esc(sc.title)}</h1>
+      <p class="lede">${esc(sc.summary)}</p>
+      <div class="meta"><span class="chip">${sc.minutes} min</span><span class="chip">${D.runsOf(sc.id).length} recorded runs</span><span class="chip">${sc.sources.length} public ${sc.sources.length === 1 ? "incident" : "incidents"}</span>${ctx.range(prim, "failed_pct", fmt.pct) ? `<span class="chip bad">${ctx.range(prim, "failed_pct", fmt.pct)} failed in ${esc(prim)}</span>` : ""}</div>
+    </div>
+    <div class="sc-grid">
+      <nav class="rail" aria-label="Steps">${STEPS.map((s, i) => `<a href="?scenario=${sc.id}&step=${s.id}" ${s.id === stepId ? 'aria-current="step"' : ""} class="${done.has(s.id) && s.id !== stepId ? "done" : ""}"><span class="n">${done.has(s.id) && s.id !== stepId ? "✓" : i + 1}</span>${s.label}</a>`).join("")}</nav>
+      <article class="step-body">
+        <span class="eyebrow kicker">Step ${idx + 1} of ${STEPS.length}</span>
+        <h2>${STEPS[idx].label}</h2>
+        ${stepHtml(sc, stepId, ctx)}
+        <div class="step-nav">${prev ? `<a class="btn" href="?scenario=${sc.id}&step=${prev.id}">← ${prev.label}</a>` : "<span></span>"}${next ? `<a class="btn primary" href="?scenario=${sc.id}&step=${next.id}">${next.label} →</a>` : `<a class="btn primary" href="?view=practice&scenario=${sc.id}">Practise this scenario →</a>`}</div>
+      </article>
+      <div class="sc-work"><div class="ws-slot"></div></div>
+    </div>
+  </div>`;
+  mountWorkspace($(".ws-slot", view));
+  runScope = sc.id;
+
+  // drive the workspace for this step
+  const want = p.get("run") || (stepId === "fix" ? bestRun(sc, sc.fixes.find((f) => D.runsOf(sc.id).some((r) => r.round === f)) || prim) : bestRun(sc, prim));
+  if (!player.run || player.run.id !== want) await player.loadRun(want, 0);
+  const w = player.run.batch_window;
+  const at = Number(p.get("at"));
+  if (p.has("at")) player.seek(at);
+  else if (stepId === "reproduce" && w) player.seek(Math.max(0, w.start_s - 5));
+  else if (stepId === "diagnose" && w) player.seek(Math.min(player.run.maxT, Math.ceil(w.end_s) + 5));
+  else if (w && player.t === 0) player.seek(Math.max(0, w.start_s - 3));
+  setTab(stepId === "drill" ? "terminal" : ["diagnose", "alert", "fix"].includes(stepId) ? "timeline" : "3d");
+  const rounds = [...new Set(D.runsOf(sc.id).map((r) => r.round))];
+  term?.setChips([`lab run ${sc.id} ${prim}`, ...sc.fixes.filter((f) => rounds.includes(f)).slice(0, 2).map((f) => `lab run ${sc.id} ${f}`), `lab report ${sc.id}`]);
+  if (stepId === "reproduce" && !reduceMotion) player.play();
+
+  for (const tr of $$("tr[data-run]", view)) tr.addEventListener("click", async () => {
+    $$("tr[data-run]", view).forEach((x) => x.classList.toggle("sel", x === tr));
+    await player.loadRun(tr.dataset.run, 0);
+    const bw = player.run.batch_window; if (bw) player.seek(Math.max(0, bw.start_s - 3));
+    setTab("timeline");
+  });
+  wirePracticeInline(view, sc, ctx);
 }
-boot();
+
+function stepHtml(sc, step, ctx) {
+  switch (step) {
+    case "incident": return `${sc.incident(ctx)}
+      <h3>The public record</h3><div class="src-cards">${sc.sources.map((k) => srcCard(SOURCES[k])).join("")}</div>
+      ${sc.reading.length ? `<h3>Background reading</h3><div class="src-cards">${sc.reading.map((k) => srcCard(SOURCES[k])).join("")}</div>` : ""}
+      <h3>What you'll practise</h3><ul>${sc.practise.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+    case "reproduce": return sc.reproduce(ctx) + roundsNote(sc);
+    case "diagnose": return sc.diagnose(ctx) + statementsTable(sc);
+    case "fix": return sc.fix(ctx) + roundsTable(sc, ctx);
+    case "alert": return sc.alert(ctx);
+    case "drill": return drillInline(sc);
+    default: return "";
+  }
+}
+const srcCard = (s) => `<a class="src" href="${s.url}" target="_blank" rel="noopener"><span class="mono">${esc(s.org[0])}</span><span><span class="t">${esc(s.org)} · ${esc(s.title)}</span><span class="d">${esc(s.date)}. ${esc(s.summary)}</span><span class="u">${esc(s.url.replace(/^https?:\/\//, ""))} ↗</span></span></a>`;
+function roundsNote(sc) {
+  const r = primaryRound(sc);
+  return `<div class="callout accent"><p><strong>Round <code>${esc(r)}</code>:</strong> ${esc(sc.rounds[r] || "")}</p><p class="faint" style="font-size:13px;margin:0">Replay of a recorded run. Switch runs from the menu under the viewport, or type <code>lab run ${esc(sc.id)} ${esc(r)}</code> in the Terminal tab.</p></div>`;
+}
+function statementsTable(sc) {
+  const id = bestRun(sc, primaryRound(sc));
+  const idx = D.index.find((x) => x.id === id);
+  return `<h3>Where the database spent its time</h3><div id="stmts" data-run="${id}"><p class="faint">Loading pg_stat_statements for ${esc(idx?.stamp || "")}…</p></div>`;
+}
+function roundsTable(sc, ctx) {
+  const rs = D.runsOf(sc.id);
+  const rate = ctx.rate;
+  const order = [...Object.keys(sc.rounds), ...new Set(rs.map((r) => r.round))].filter((v, i, a) => a.indexOf(v) === i && rs.some((r) => r.round === v && r.rate === rate));
+  const rec = (round) => {
+    const xs = rs.filter((r) => r.round === round && r.rate === rate).map((r) => r.headline.recovered_s);
+    if (!xs.some((v) => v !== null)) return xs.length && rs.find((r) => r.round === round)?.headline.batch_seconds ? '<span class="v-bad">not within the run</span>' : "–";
+    const never = xs.filter((v) => v === null).length;
+    const ok = xs.filter((v) => v !== null);
+    return `${ok.length === 1 || Math.min(...ok) === Math.max(...ok) ? fmt.s(ok[0]) : `${fmt.s(Math.min(...ok)).replace(" s", "")}–${fmt.s(Math.max(...ok))}`}${never ? ` <span class="v-bad">(${never} never)</span>` : ""}`;
+  };
+  return `<h3>All rounds at ${rate} req/s</h3><div class="tablewrap"><table class="data"><thead><tr><th>Round</th><th class="n">Failed</th><th class="n">After the job</th><th>Recovered</th></tr></thead><tbody>${order.map((round) => {
+    const f = ctx.range(round, "failed_pct", fmt.pct);
+    const hiF = Math.max(...rs.filter((r) => r.round === round && r.rate === rate).map((r) => r.headline.failed_pct));
+    return `<tr data-run="${bestRun(sc, round)}"><td><strong>${esc(round)}</strong> <span class="faint">· ${ctx.count(round)} ${ctx.count(round) === 1 ? "run" : "runs"}</span></td><td class="n ${hiF > 1 ? "v-bad" : "v-ok"}">${f ?? "–"}</td><td class="n">${ctx.range(round, "failed_after_batch", fmt.n) ?? "–"}</td><td>${rec(round)}</td></tr>`;
+  }).join("")}</tbody></table></div><p class="faint" style="font-size:13px">Ranges cover every recorded run of a round; round descriptions are in the Terminal (<code>lab rounds ${esc(sc.id)}</code>). Click a row to replay it.</p>`;
+}
+
+// ---------------- interview practice ----------------
+const SRS_KEY = "pgpl-srs";
+const qid = (sc, i) => `${sc.id}:${i}`;
+function srs() { return store.get(SRS_KEY, {}); }
+function progressOf(sc) {
+  const s = srs(); const n = sc.interview.length; if (!n) return 0;
+  return sc.interview.filter((_, i) => s[qid(sc, i)] && s[qid(sc, i)].last !== "again").length / n;
+}
+function nextQuestion(sc) {
+  const s = srs();
+  return sc.interview.map((_, i) => ({ i, due: s[qid(sc, i)]?.due ?? 0 })).sort((a, b) => a.due - b.due || a.i - b.i)[0]?.i ?? 0;
+}
+function drillInline(sc) {
+  if (!sc.interview.length) return "<p>No questions yet for this scenario.</p>";
+  return `<p>The question an interviewer is most likely to ask about this scenario. Answer it in your own words before you look.</p><div id="inline-q"></div><p style="margin-top:16px"><a class="btn" href="?view=practice&scenario=${sc.id}">All ${sc.interview.length} questions, with spaced repetition →</a></p>`;
+}
+function wirePracticeInline(view, sc, ctx) {
+  const slot = $("#inline-q", view);
+  if (slot) mountQuestion(slot, sc, ctx, nextQuestion(sc), { inline: true });
+  const st = $("#stmts", view);
+  if (st) D.load(st.dataset.run).then((r) => {
+    const rows = (r.top_statements || []).slice(0, 6);
+    st.innerHTML = rows.length ? `<div class="tablewrap"><table class="data"><thead><tr><th>Statement</th><th class="n">Calls</th><th class="n">Total</th><th class="n">Max</th></tr></thead><tbody>${rows.map((s) => `<tr><td><code style="font-size:12px;white-space:normal">${esc(s.query.slice(0, 110))}${s.query.length > 110 ? "…" : ""}</code></td><td class="n">${fmt.n(s.calls)}</td><td class="n">${fmt.ms(s.total_ms)}</td><td class="n">${fmt.ms(s.max_ms)}</td></tr>`).join("")}</tbody></table></div><p class="faint" style="font-size:13px">From pg_stat_statements for run ${esc(r.stamp)}.</p>` : "<p class='faint'>No statements recorded for this run.</p>";
+  });
+}
+
+let timerHandle = null;
+function mountQuestion(slot, sc, ctx, i, { inline = false } = {}) {
+  const q = sc.interview[i];
+  const draftKey = `pgpl-draft-${qid(sc, i)}`;
+  const limit = 150;
+  slot.innerHTML = `<div class="qcard">
+    <div class="qh"><div class="row"><span class="chip accent">${esc(sc.short)} · Q${i + 1} of ${sc.interview.length}</span><span class="timer" id="timer"><span class="bar"><i></i></span><span class="tv">2:30</span></span></div>
+      <p class="q">${esc(q.q)}</p></div>
+    <div class="qb">
+      <label class="sr" for="ans">Your answer</label>
+      <textarea id="ans" placeholder="Answer out loud or type it: what you'd look at first, how you'd stop the bleeding, the root cause, and what you'd change.">${esc(store.get(draftKey, ""))}</textarea>
+      <div class="actions"><button class="btn primary" id="reveal" type="button">Reveal model answer</button>${inline ? "" : '<button class="btn ghost" id="skip" type="button">Skip</button>'}<span class="faint" style="font-size:13px;margin-left:auto">Your draft is saved in this browser.</span></div>
+      <div id="model" hidden></div>
+    </div></div>`;
+  const ta = $("#ans", slot);
+  ta.addEventListener("input", () => store.set(draftKey, ta.value));
+  clearInterval(timerHandle);
+  let left = limit; const tv = $(".tv", slot), bar = $(".bar i", slot), tm = $("#timer", slot);
+  const draw = () => { const m = Math.floor(Math.abs(left) / 60), s = String(Math.abs(left) % 60).padStart(2, "0"); tv.textContent = left >= 0 ? `${m}:${s}` : `+${m}:${s} over`; bar.style.width = `${Math.min(100, ((limit - left) / limit) * 100)}%`; tm.classList.toggle("over", left < 0); };
+  draw(); timerHandle = setInterval(() => { left--; draw(); if (!slot.isConnected) clearInterval(timerHandle); }, 1000);
+  $("#reveal", slot).addEventListener("click", () => {
+    clearInterval(timerHandle);
+    const a = q.a(ctx);
+    const part = (k, label, dot) => `<div class="part"><h4><i class="dot ${dot}"></i>${label}</h4><ul>${(a[k] || []).map((x) => `<li>${x}</li>`).join("")}</ul></div>`;
+    const m = $("#model", slot);
+    m.innerHTML = `<div class="answer">${part("detect", "Detect", "wait")}${part("mitigate", "Mitigate", "shed")}${part("root", "Root cause", "bad")}${part("prevent", "Prevent", "ok")}</div>
+      ${q.followups?.length ? `<div class="followups"><h4>Likely follow-ups</h4><ul>${q.followups.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></div>` : ""}
+      <div class="grade"><span class="muted" style="font-size:14px">How did you do?</span><button class="btn sm" data-g="again" type="button">Again</button><button class="btn sm" data-g="good" type="button">Good</button><button class="btn sm" data-g="easy" type="button">Easy</button><span class="faint" id="graded" style="font-size:13px"></span></div>`;
+    m.hidden = false;
+    $("#reveal", slot).hidden = true;
+    for (const b of $$("[data-g]", m)) b.addEventListener("click", () => {
+      const s = srs(); const cur = s[qid(sc, i)] || { interval: 0, reps: 0 };
+      const g = b.dataset.g; const day = 86400000;
+      cur.interval = g === "again" ? 0 : g === "good" ? Math.max(1, cur.interval * 2 || 1) : Math.max(3, cur.interval * 3 || 3);
+      cur.due = Date.now() + (g === "again" ? 60000 : cur.interval * day); cur.reps++; cur.last = g;
+      s[qid(sc, i)] = cur; store.set(SRS_KEY, s);
+      $("#graded", m).textContent = g === "again" ? "We'll ask again in a minute." : `Next review in ${cur.interval} day${cur.interval === 1 ? "" : "s"}.`;
+      if (!inline) setTimeout(() => go(`?view=practice&scenario=${sc.id}`), 700);
+      updateRings();
+    });
+  });
+  $("#skip", slot)?.addEventListener("click", () => {
+    const n = (i + 1) % sc.interview.length; mountQuestion(slot, sc, ctx, n);
+  });
+}
+function updateRings() { for (const el of $$("[data-ring]")) { const sc = SCENARIOS.find((s) => s.id === el.dataset.ring); el.style.setProperty("--p", Math.round(progressOf(sc) * 100)); } }
+
+async function renderPractice(view, p) {
+  const scs = liveScenarios().filter((s) => s.interview.length);
+  const sc = scs.find((s) => s.id === p.get("scenario")) || scs[0];
+  if (!sc) { view.innerHTML = `<div class="wrap" style="padding:80px 0"><h1>No questions yet</h1></div>`; return; }
+  const ctx = makeCtx(sc, await signalsFor(sc).catch(() => []));
+  const star = sc.star(ctx);
+  view.innerHTML = `<div class="wrap">
+    <div class="sc-head" style="padding-top:36px">
+      <span class="eyebrow">Interview practice</span>
+      <h1>Explain it like you've debugged it</h1>
+      <p class="lede">Questions an SRE or database interview loop asks about these failures. Answer against the clock, compare with a model answer built from the measured runs, and grade yourself: questions you miss come back sooner.</p>
+    </div>
+    <div class="prac-grid">
+      <aside class="prac-side">${scs.map((s) => `<button class="prac-sc" type="button" data-sc="${s.id}" aria-pressed="${s.id === sc.id}"><span class="ring" data-ring="${s.id}" style="--p:${Math.round(progressOf(s) * 100)}"></span><span><strong style="font-size:14px">${esc(s.short)}</strong><small>${s.interview.length} questions</small></span></button>`).join("")}
+        <a class="btn" href="?scenario=${sc.id}" style="justify-content:center">Open the ${esc(sc.short.toLowerCase())} replay</a>
+      </aside>
+      <div>
+        <div id="q-slot"></div>
+        <div class="card star"><h3>Your story for this scenario <span class="chip" style="margin-left:6px">STAR</span></h3><p class="faint" style="font-size:13px;margin:6px 0 0">Adapt it, and say plainly that this was a lab you built and measured, not a production incident you were paged for.</p>
+          <dl>${Object.entries(star).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>
+      </div>
+    </div></div>`;
+  for (const b of $$(".prac-sc", view)) b.addEventListener("click", () => go(`?view=practice&scenario=${b.dataset.sc}`));
+  const qi = p.has("q") ? Math.min(sc.interview.length - 1, Math.max(0, Number(p.get("q")) - 1)) : nextQuestion(sc);
+  mountQuestion($("#q-slot", view), sc, ctx, qi);
+}
+
+// ---------------- developers ----------------
+function devSection() {
+  const code = (s) => `<div style="position:relative"><button class="copy" type="button">Copy</button><pre class="code">${s}</pre></div>`;
+  return `<section class="block alt" id="run"><div class="wrap">
+    <div class="section-head"><div><span class="eyebrow">Run it yourself</span><h2 style="margin-top:10px">Replay mode here, live mode on your machine</h2><p>Everything on this site replays files in <code>results/</code>. Run the lab and the same viewport switches to <strong>live</strong>, following your run second by second.</p></div></div>
+    <div class="dev-grid">
+      <div class="dev-card"><span class="n">1</span><h3>Start the lab</h3><p>Docker with Compose v2, about 5 GB of free memory and 6 GB of disk.</p>${code(`git clone https://github.com/shanurwan/pg-pressure-lab
+cd pg-pressure-lab
+scripts/lab up
+scripts/lab seed   <span class="c"># 200k accounts, 20M orders</span>`)}</div>
+      <div class="dev-card"><span class="n">2</span><h3>Open live mode</h3><p>This site, served by the lab, streaming your run over Server-Sent Events.</p>${code(`scripts/lab live
+<span class="c"># open http://localhost:58090</span>`)}</div>
+      <div class="dev-card"><span class="n">3</span><h3>Break it, then fix it</h3><p>Each run writes per-second results under <code>results/</code>.</p>${code(`scripts/lab rounds batch
+scripts/lab run batch naive
+scripts/lab run batch chunked
+go run ./cmd/report -scenario batch`)}</div>
+    </div>
+    <div class="dev-grid" style="margin-top:16px;grid-template-columns:minmax(0,1fr) minmax(0,1fr)">
+      <div class="dev-card"><span class="n">AI</span><h3>Ask an assistant about the runs (MCP)</h3><p>The lab ships an MCP server. Claude or any MCP client can compare rounds, zoom into the seconds around a failure, and ask which signal moved first; with <code>-allow-run</code> it can run a drill on your lab.</p>${code(`claude mcp add pg-pressure-lab -- \\
+  go run ./cmd/mcp -repo "$PWD"`)}<p class="faint" style="font-size:13px">Tools: <code>list_rounds</code> <code>list_runs</code> <code>get_timeline</code> <code>first_signals</code> <code>run_drill</code></p></div>
+      <div class="dev-card"><span class="n">{ }</span><h3>One frame per second</h3><p>Replay files and the live stream share one format.</p>${code(`{ "t": 42,
+  "ops": { "order": { "n": 75, "ok": 75,
+           "p50": 14.9, "p99": 210.0, "errors": {} } },
+  "db":  { "pg_lock_wait": 0, "longest_xact_s": 12.0,
+           "bouncer_cl_waiting": 0, "pool_acquired": 4,
+           "pg_sessions_started": 0, ... },
+  "events": ["batch_start"] }`)}</div>
+    </div>
+  </div></section>`;
+}
+function wireCopy(root) {
+  for (const b of $$(".copy", root)) b.addEventListener("click", async () => {
+    const txt = b.nextElementSibling.textContent;
+    try { await navigator.clipboard.writeText(txt); b.textContent = "Copied"; } catch { b.textContent = "Select and copy"; }
+    setTimeout(() => (b.textContent = "Copy"), 1400);
+  });
+}
+
+// ---------------- boot ----------------
+(async () => {
+  try {
+    await D.init();
+  } catch (e) {
+    $("#view").innerHTML = `<div class="wrap" style="padding:80px 0"><h1>Couldn't load the recorded runs</h1><p class="muted">${esc(e.message)}</p></div>`;
+    return;
+  }
+  await initWorkspace();
+  if (LIVE) startLive();
+  await render();
+  if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView();
+})();

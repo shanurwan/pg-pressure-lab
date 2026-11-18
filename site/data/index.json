@@ -1,5 +1,5 @@
 {
- "generated_utc": "2026-11-18T04:36:58Z",
+ "generated_utc": "2026-11-18T05:46:17Z",
  "runs": [
   {
    "id": "batch-baseline-20261118T034857Z",
@@ -368,6 +368,298 @@
     "max_bouncer_queue": 0,
     "max_longest_xact_s": 0.09,
     "max_sessions_per_s": 8
+   }
+  },
+  {
+   "id": "conn-baseline-20261118T045159Z",
+   "scenario": "conn",
+   "round": "baseline",
+   "stamp": "20261118T045159Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 26371,
+    "failed_pct": 48.83,
+    "seconds_with_failures": 89,
+    "worst_second_ok": 0,
+    "order_p99_ms": 1736.074,
+    "read_p99_ms": 1588.401,
+    "errors": {
+     "deadline": 26371
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 40,
+    "max_longest_xact_s": 0.71,
+    "max_sessions_per_s": 80
+   }
+  },
+  {
+   "id": "conn-shared-20261118T045517Z",
+   "scenario": "conn",
+   "round": "shared",
+   "stamp": "20261118T045517Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 544,
+    "failed_pct": 1.01,
+    "seconds_with_failures": 172,
+    "worst_second_ok": 0.96,
+    "order_p99_ms": 1859.189,
+    "read_p99_ms": 1745.785,
+    "errors": {
+     "deadline": 544
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 22,
+    "max_longest_xact_s": 10.62,
+    "max_sessions_per_s": 13
+   }
+  },
+  {
+   "id": "conn-bulkhead-20261118T045834Z",
+   "scenario": "conn",
+   "round": "bulkhead",
+   "stamp": "20261118T045834Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 552,
+    "failed_pct": 1.02,
+    "seconds_with_failures": 172,
+    "worst_second_ok": 0.97,
+    "order_p99_ms": 664.127,
+    "read_p99_ms": 473.883,
+    "errors": {
+     "deadline": 552
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 20,
+    "max_longest_xact_s": 17.63,
+    "max_sessions_per_s": 9
+   }
+  },
+  {
+   "id": "conn-bulkhead-timeout-20261118T050148Z",
+   "scenario": "conn",
+   "round": "bulkhead-timeout",
+   "stamp": "20261118T050148Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 508,
+    "failed_pct": 0.94,
+    "seconds_with_failures": 170,
+    "worst_second_ok": 0.96,
+    "order_p99_ms": 1052.648,
+    "read_p99_ms": 898.734,
+    "errors": {
+     "deadline": 210,
+     "statement_timeout": 298
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 22,
+    "max_longest_xact_s": 1.22,
+    "max_sessions_per_s": 13
+   }
+  },
+  {
+   "id": "conn-baseline-20261118T050458Z",
+   "scenario": "conn",
+   "round": "baseline",
+   "stamp": "20261118T050458Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 0,
+    "failed_pct": 0,
+    "seconds_with_failures": 0,
+    "worst_second_ok": 1,
+    "order_p99_ms": 191.412,
+    "read_p99_ms": 79.597,
+    "errors": {},
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 18,
+    "max_longest_xact_s": 0.14,
+    "max_sessions_per_s": 8
+   }
+  },
+  {
+   "id": "conn-shared-20261118T050809Z",
+   "scenario": "conn",
+   "round": "shared",
+   "stamp": "20261118T050809Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 597,
+    "failed_pct": 1.11,
+    "seconds_with_failures": 173,
+    "worst_second_ok": 0.97,
+    "order_p99_ms": 187.999,
+    "read_p99_ms": 113.086,
+    "errors": {
+     "deadline": 597
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 24,
+    "max_longest_xact_s": 2.32,
+    "max_sessions_per_s": 13
+   }
+  },
+  {
+   "id": "conn-bulkhead-20261118T051117Z",
+   "scenario": "conn",
+   "round": "bulkhead",
+   "stamp": "20261118T051117Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 516,
+    "failed_pct": 0.96,
+    "seconds_with_failures": 168,
+    "worst_second_ok": 0.97,
+    "order_p99_ms": 117.863,
+    "read_p99_ms": 63.249,
+    "errors": {
+     "deadline": 516
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 9,
+    "max_longest_xact_s": 4.35,
+    "max_sessions_per_s": 9
+   }
+  },
+  {
+   "id": "conn-bulkhead-timeout-20261118T051425Z",
+   "scenario": "conn",
+   "round": "bulkhead-timeout",
+   "stamp": "20261118T051425Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 529,
+    "failed_pct": 0.98,
+    "seconds_with_failures": 165,
+    "worst_second_ok": 0.97,
+    "order_p99_ms": 96.526,
+    "read_p99_ms": 48.622,
+    "errors": {
+     "deadline": 157,
+     "statement_timeout": 372
+    },
+    "batch_seconds": null,
+    "failed_after_batch": null,
+    "failed_during_batch": null,
+    "recovered_s": null,
+    "max_lock_wait": 0,
+    "max_bouncer_queue": 1,
+    "max_longest_xact_s": 1.08,
+    "max_sessions_per_s": 11
+   }
+  },
+  {
+   "id": "batch-naive-cancelreq-20261118T053246Z",
+   "scenario": "batch",
+   "round": "naive-cancelreq",
+   "stamp": "20261118T053246Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 920,
+    "failed_pct": 1.7,
+    "seconds_with_failures": 14,
+    "worst_second_ok": 0.68,
+    "order_p99_ms": 769.142,
+    "read_p99_ms": 2104.416,
+    "errors": {
+     "canceled": 677,
+     "deadline": 243
+    },
+    "batch_seconds": 36,
+    "failed_after_batch": 0,
+    "failed_during_batch": 920,
+    "recovered_s": 0.8,
+    "max_lock_wait": 20,
+    "max_bouncer_queue": 25,
+    "max_longest_xact_s": 35.96,
+    "max_sessions_per_s": 86
+   }
+  },
+  {
+   "id": "batch-naive-cancelreq-20261118T053552Z",
+   "scenario": "batch",
+   "round": "naive-cancelreq",
+   "stamp": "20261118T053552Z",
+   "date": "2026-11-18",
+   "rate": 300,
+   "duration": "180s",
+   "headline": {
+    "requests": 54001,
+    "failed": 1033,
+    "failed_pct": 1.91,
+    "seconds_with_failures": 14,
+    "worst_second_ok": 0.55,
+    "order_p99_ms": 918.218,
+    "read_p99_ms": 2112.135,
+    "errors": {
+     "canceled": 598,
+     "deadline": 435
+    },
+    "batch_seconds": 38.8,
+    "failed_after_batch": 0,
+    "failed_during_batch": 1033,
+    "recovered_s": 0.3,
+    "max_lock_wait": 20,
+    "max_bouncer_queue": 35,
+    "max_longest_xact_s": 37.82,
+    "max_sessions_per_s": 98
    }
   }
  ]

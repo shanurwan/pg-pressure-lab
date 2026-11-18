@@ -3,183 +3,109 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PostgreSQL Under Pressure</title>
-<meta name="description" content="Interactive replays of real recorded runs: how an overnight batch job takes down a PostgreSQL-backed API, why it does not come back on its own, and the fixes, measured.">
-<meta name="theme-color" content="#0b1020">
+<title>pg-pressure-lab · Real PostgreSQL incidents, replayed</title>
+<meta name="description" content="Interactive replays of recorded PostgreSQL incidents on a Go + PgBouncer + PostgreSQL stack, based on real public postmortems. See which signal moved first, measure every fix, and practise the interview questions.">
+<meta property="og:title" content="pg-pressure-lab · Real PostgreSQL incidents, replayed">
+<meta property="og:description" content="Recorded runs of PostgreSQL failure modes from real postmortems: replay them in 3D, compare fixes, practise the interview questions.">
+<meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%230891b2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Crect x='8' y='9' width='16' height='14' rx='3' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<script>
+  try { const t = localStorage.getItem("pgpl-theme"); if (t) document.documentElement.dataset.theme = JSON.parse(t); } catch {}
+</script>
 <script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-} }
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
 </script>
 </head>
 <body>
-<div class="bg-grid" aria-hidden="true"></div>
+<a class="sr" href="#view">Skip to content</a>
 
-<header class="top">
-  <a class="brand" href="./" aria-label="PostgreSQL Under Pressure, home">
-    <span class="brand-mark" aria-hidden="true"></span>
-    <span>pg-pressure-lab</span>
-  </a>
-  <nav class="top-nav">
-    <a href="#course">Replays</a>
-    <a href="#developers">Run it yourself</a>
-    <a href="https://github.com/shanurwan/pg-pressure-lab">GitHub</a>
-    <button id="theme" class="icon-btn" type="button" aria-label="Switch light or dark theme">◐</button>
-  </nav>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="./" data-nav="home"><span class="logo" aria-hidden="true"></span>pg-pressure-lab</a>
+    <nav class="nav-links" id="nav-links" aria-label="Main">
+      <a href="./#scenarios" data-nav="scenarios">Scenarios</a>
+      <a href="./?view=practice" data-nav="practice">Interview practice</a>
+      <a href="./#run" data-nav="run">Run it yourself</a>
+    </nav>
+    <div class="nav-right">
+      <a class="gh" href="https://github.com/shanurwan/pg-pressure-lab" target="_blank" rel="noopener" aria-label="pg-pressure-lab on GitHub">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="label">GitHub</span><span class="count" id="stars" hidden></span>
+      </a>
+      <button class="icon-btn" id="theme" type="button" aria-label="Switch light or dark theme">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+      </button>
+      <button class="icon-btn menu-btn" id="menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+  </div>
 </header>
 
-<section class="hero">
-  <p class="kicker">Interactive replays · real recorded runs</p>
-  <h1>The batch job finished.<br><em>The outage didn't.</em></h1>
-  <p class="lede" id="hero-lede">Loading the recorded runs…</p>
-  <div class="hero-stats" id="hero-stats" aria-live="polite"></div>
-  <div class="hero-cta">
-    <a class="btn primary" href="#course" id="start">Start lesson 1</a>
-    <a class="btn ghost" href="#developers">Run it on your machine</a>
-  </div>
-</section>
+<main id="view" tabindex="-1"></main>
 
-<main id="course" class="course">
-  <aside class="lessons" aria-label="Lessons">
-    <p class="lessons-title">Lessons</p>
-    <ol id="lesson-list"></ol>
-    <div class="progress" aria-hidden="true"><div id="progress-bar"></div></div>
-  </aside>
-
-  <section class="stage">
-    <article class="lesson-card" id="lesson" aria-live="polite"></article>
-
-    <div class="viz panel">
-      <div class="viz-head">
-        <div class="run-label">
-          <span class="badge" id="mode-badge">REPLAY</span>
-          <span id="run-desc">—</span>
-        </div>
-        <label class="run-pick">Run
-          <select id="run-select" aria-label="Recorded run"></select>
-        </label>
+<!-- The one workspace: moved between the hero and a scenario page. -->
+<template id="workspace-tpl">
+  <div class="window workspace" id="workspace">
+    <div class="window-bar">
+      <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="tabs" role="tablist" aria-label="Workspace view">
+        <button role="tab" aria-selected="true" data-tab="3d">3D</button>
+        <button role="tab" aria-selected="false" data-tab="timeline">Timeline</button>
+        <button role="tab" aria-selected="false" data-tab="terminal">Terminal</button>
       </div>
-      <div class="scene-wrap">
-        <canvas id="scene" aria-label="3D view of requests flowing from the API through the pools to PostgreSQL"></canvas>
-        <div id="labels" class="labels" aria-hidden="true"></div>
-        <div class="hud" id="hud" aria-live="off"></div>
+      <div class="mode"><span class="badge" id="ws-badge">REPLAY</span><span id="ws-mode"></span></div>
+    </div>
+    <div class="stage">
+      <div class="pane" data-pane="3d">
+        <canvas class="three" id="ws-canvas" aria-label="3D view of the request path"></canvas>
+        <div class="labels" id="ws-labels"></div>
+        <div class="hud" id="ws-hud" aria-live="off"></div>
         <div class="legend" aria-hidden="true">
-          <span><i class="dot ok"></i>succeeded</span>
-          <span><i class="dot bad"></i>timed out</span>
-          <span><i class="dot shed"></i>refused fast</span>
-          <span><i class="dot batch"></i>batch transaction</span>
+          <span><i style="background:var(--vp-ok)"></i>succeeded</span>
+          <span><i style="background:var(--vp-bad)"></i>failed</span>
+          <span><i style="background:var(--vp-shed)"></i>refused fast</span>
+          <span><i style="background:var(--vp-wait)"></i>waiting</span>
+          <span><i style="background:var(--vp-busy)"></i>in use</span>
+          <span><i style="background:var(--vp-job)"></i>job</span>
         </div>
-        <p class="nogl" id="nogl" hidden>Your browser has WebGL turned off, so the 3D view is hidden. The chart, terminal and timeline below show the same run.</p>
+        <div class="nogl" id="ws-nogl" hidden><div>The 3D view needs WebGL, which isn't available here.<br>The Timeline and Terminal tabs show the same run.</div></div>
       </div>
-      <div class="timeline">
-        <button id="play" class="icon-btn" type="button" aria-label="Play">▶</button>
-        <input id="scrub" type="range" min="0" max="179" value="0" step="1" aria-label="Time in the run, seconds">
-        <span class="clock" id="clock">0 s</span>
-        <select id="speed" aria-label="Replay speed">
-          <option value="1">1×</option><option value="4">4×</option>
-          <option value="10" selected>10×</option><option value="30">30×</option>
-        </select>
-        <button id="share" class="icon-btn" type="button" aria-label="Copy a link to this moment">🔗</button>
+      <div class="pane" data-pane="timeline" hidden>
+        <div class="chartwrap"><canvas id="ws-chart" aria-label="Per-second timeline of the run"></canvas><div class="chart-keys" id="ws-keys"></div></div>
+        <div class="readout" id="ws-readout" hidden></div>
       </div>
-      <canvas id="chart" class="chart" height="170" aria-label="Chart of the run, second by second"></canvas>
-      <div class="chart-key" id="chart-key"></div>
-    </div>
-
-    <div class="terminal panel" id="terminal">
-      <div class="term-head">
-        <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span>lab — replaying recorded files, not a live database</span>
+      <div class="pane" data-pane="terminal" hidden>
+        <div class="term" id="ws-term">
+          <div class="term-out" role="log" aria-live="polite"></div>
+          <div class="term-chips"></div>
+          <form class="term-in" autocomplete="off"><span class="p">$</span><input aria-label="Command" placeholder="type help" spellcheck="false"></form>
+        </div>
       </div>
-      <div class="term-body" id="term-out" role="log" aria-live="polite"></div>
-      <form class="term-in" id="term-form" autocomplete="off">
-        <span class="prompt">$</span>
-        <input id="term-input" spellcheck="false" aria-label="Type a command, for example: lab run batch naive" placeholder="type: help">
-      </form>
-      <div class="chips" id="chips"></div>
     </div>
-  </section>
-</main>
-
-<section id="developers" class="dev">
-  <p class="kicker">Developers</p>
-  <h2>Run it on your own machine</h2>
-  <p class="dev-lede">Everything on this page is a replay of files in <code>results/</code>. To watch it happen for real, run the lab yourself: the same page then switches to <strong>live mode</strong> and follows your run second by second.</p>
-  <div class="dev-grid">
-    <div class="panel step">
-      <h3><span class="num">1</span>Start the lab</h3>
-      <p>Needs Docker with Compose v2, about 5 GB of free memory and 6 GB of disk.</p>
-      <pre><code>git clone https://github.com/shanurwan/pg-pressure-lab
-cd pg-pressure-lab
-scripts/lab up
-scripts/lab seed     # 200k accounts, 2M positions, 20M orders</code></pre>
-      <p class="muted" id="seed-note">The seed is the slow part: a few minutes. <code>ORDERS=1000000 scripts/lab seed</code> for a quick try.</p>
-    </div>
-    <div class="panel step">
-      <h3><span class="num">2</span>Open live mode</h3>
-      <p>This site, served by the lab, reading your runs as they are written.</p>
-      <pre><code>scripts/lab live
-# open http://localhost:58090</code></pre>
-      <p class="muted">Live mode streams one frame per second from <code>/live/events</code> (Server-Sent Events). The badge above the 3D view turns <span class="live-word">LIVE</span>.</p>
-    </div>
-    <div class="panel step">
-      <h3><span class="num">3</span>Break it, then fix it</h3>
-      <pre><code>scripts/lab rounds batch
-scripts/lab run batch naive
-scripts/lab run batch naive-failfast
-scripts/lab run batch chunked
-go run ./cmd/report -scenario batch</code></pre>
-      <p class="muted">Each run writes <code>results/&lt;scenario&gt;/&lt;round&gt;/&lt;time&gt;/</code>. Rebuild this site's data with <code>go run ./cmd/sitedata</code>.</p>
+    <div class="player">
+      <button class="play" id="ws-play" type="button" aria-label="Play"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z"/></svg></button>
+      <div class="scrub"><canvas id="ws-strip" aria-hidden="true"></canvas><input type="range" id="ws-range" min="0" max="180" step="1" value="0" aria-label="Time in the run, seconds"></div>
+      <span class="time" id="ws-time">0 s</span>
+      <select id="ws-speed" aria-label="Playback speed"><option value="2">2×</option><option value="5">5×</option><option value="10" selected>10×</option><option value="20">20×</option></select>
+      <select class="run" id="ws-run" aria-label="Recorded run"></select>
     </div>
   </div>
-
-  <details class="panel schema">
-    <summary>The frame format (replay files and the live stream use the same one)</summary>
-<pre><code>{ "t": 42,
-  "ops": { "order": { "n": 75, "ok": 75, "p50": 14.9, "p99": 210.0, "errors": {} } },
-  "db":  { "pg_active": 3, "pg_idle_in_tx": 0, "pg_lock_wait": 0, "pg_total": 21,
-           "longest_xact_s": 12.0, "bouncer_cl_waiting": 0, "bouncer_maxwait_ms": 0,
-           "pool_acquired": 4, "pool_empty_acquires": 0,
-           "pg_sessions_started": 0, "pg_sessions_abandoned": 0 },
-  "events": ["batch_start"] }</code></pre>
-  </details>
-
-  <h2 class="mcp-title">Ask an AI assistant about the runs</h2>
-  <p class="dev-lede">The lab ships an <strong>MCP server</strong> (<code>cmd/mcp</code>), so Claude or any MCP client can read the same recorded runs this page replays: compare rounds, zoom into the seconds around a failure, and ask which signal moved first. With <code>-allow-run</code> it can also run a drill on your local lab and read the result.</p>
-  <div class="dev-grid">
-    <div class="panel step">
-      <h3><span class="num">1</span>Add it</h3>
-      <pre><code>cd pg-pressure-lab
-claude mcp add pg-pressure-lab -- \
-  go run ./cmd/mcp -repo "$PWD"
-
-# let it run drills on your lab too:
-claude mcp add pg-pressure-lab -- \
-  go run ./cmd/mcp -repo "$PWD" -allow-run</code></pre>
-    </div>
-    <div class="panel step">
-      <h3><span class="num">2</span>The tools</h3>
-      <p><code>list_rounds</code> what each round changes<br>
-      <code>list_runs</code> headline numbers and the comparison table<br>
-      <code>get_timeline</code> second by second, every layer<br>
-      <code>first_signals</code> which signal rose first, and how long before the first failure<br>
-      <code>run_drill</code> run one round (only with <code>-allow-run</code>)</p>
-    </div>
-    <div class="panel step">
-      <h3><span class="num">3</span>Ask it</h3>
-      <p class="muted">"Compare naive and naive-failfast. Why did one recover and the other not?"</p>
-      <p class="muted">"For the latest naive run, what should we have alerted on, and how much warning would it have given?"</p>
-      <p class="muted">"Run batch chunked at 150 req/s and tell me if anything failed."</p>
-    </div>
-  </div>
-</section>
+</template>
 
 <footer class="foot">
-  <p>Built from recorded runs on a single host. Numbers compare rounds run on the same machine; they are not a benchmark of PostgreSQL. Code and raw results: <a href="https://github.com/shanurwan/pg-pressure-lab">github.com/shanurwan/pg-pressure-lab</a> · Apache-2.0</p>
+  <div class="wrap row">
+    <div>
+      <p><strong>Scope.</strong> Every run was recorded on a single host with PostgreSQL 17, PgBouncer 1.24 and a Go API using pgx. Numbers compare configurations run on the same machine; they are not a benchmark of PostgreSQL or of any company's systems. Incident summaries paraphrase the linked public postmortems.</p>
+      <p>Code, raw results and how to reproduce every number: <a href="https://github.com/shanurwan/pg-pressure-lab">github.com/shanurwan/pg-pressure-lab</a> · Apache-2.0</p>
+    </div>
+    <nav aria-label="Footer"><a href="./#scenarios">Scenarios</a><a href="./?view=practice">Interview practice</a><a href="./#run">Run it yourself</a></nav>
+  </div>
 </footer>
 
 <script type="module" src="app.js"></script>
