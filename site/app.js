@@ -79,7 +79,7 @@ function renderHero() {
     <strong>${range(nv.map((x) => x.headline.batch_seconds), sec)}</strong> end-of-day job made
     <strong>${range(nv.map((x) => x.headline.failed_pct), (v) => v.toFixed(0) + "%")}</strong> of all requests fail,
     and the API kept failing long after the job had committed. Replay what happened, second by second,
-    then watch two fixes take it to zero.`;
+    then watch two fixes: one takes failures to zero, the other brings the API back within a second.`;
   const stats = [
     ["bad", range(nv.map((x) => x.headline.failed_pct), (v) => v.toFixed(0) + "%"), "of all requests failed during a naive batch"],
     ["batch", range(nv.map((x) => x.headline.failed_after_batch), fmtN), "requests failed after the batch had already finished"],
