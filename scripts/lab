@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Drive the lab.
+#
+#   scripts/lab up                      build and start PostgreSQL, PgBouncer, the API
+#   scripts/lab seed                    load data (ACCOUNTS, SYMBOLS, ORDERS)
+#   scripts/lab run <scenario> <round>  one recorded run; results/<scenario>/<round>/<time>/
+#   scripts/lab rounds <scenario>       list a scenario's rounds
+#   scripts/lab psql                    a psql shell on the primary
+#   scripts/lab down                    stop and delete everything, data included
+#
+# Tunables (environment): RATE (req/s, default 300), DURATION (default 180s),
+# BATCH_AT (seconds into the run when the batch starts, default 30).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+DC=(docker compose -f deploy/compose.yaml)
+RATE=${RATE:-300}
+DURATION=${DURATION:-180s}
+BATCH_AT=${BATCH_AT:-30}
+ACCOUNTS=${ACCOUNTS:-200000}
+SYMBOLS=${SYMBOLS:-2000}
+ORDERS=${ORDERS:-20000000}
+
+APP_URL='postgres://app@pgbouncer:6432/lab?pool_max_conns=40&default_query_exec_mode=exec'
+REPORT_URL='postgres://report@pgbouncer:6432/lab_report?pool_max_conns=3&default_query_exec_mode=exec'
+BATCH_SHARED='postgres://batch@pgbouncer:6432/lab?default_query_exec_mode=exec'
+BATCH_OWN='postgres://batch@pgbouncer:6432/lab_batch?default_query_exec_mode=exec'
+
+psql_admin() { "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v ON_ERROR_STOP=1 -qAt "$@"; }
+
+# round <scenario> <round>: sets MIX, API_* variables, ROLE_SQL and BATCH_ARGS.
+# Each round changes one thing from the one before it.
+round() {
+  MIX='account=40,positions=25,orders=10,order=25'
+  API_DATABASE_URL=$APP_URL API_READ_DATABASE_URL='' API_REPORT_DATABASE_URL='' API_REQUEST_TIMEOUT=2s
+  ROLE_SQL='' BATCH_ARGS=''
+  case "$1/$2" in
+    # Overnight batch against live traffic.
+    batch/baseline)  ;;                                            # no batch: the reference
+    batch/naive)     BATCH_ARGS="-mode naive -dsn $BATCH_SHARED" ;;  # one big transaction
+    batch/chunked)   BATCH_ARGS="-mode chunked -dsn $BATCH_OWN -chunk 1000 -lock-timeout 100ms" ;;
+    # A slow query that shares the pool with everything else.
+    conn/baseline)   ;;
+    conn/shared)     MIX='account=39,positions=25,orders=10,order=25,activity=1' ;;
+    conn/bulkhead)   MIX='account=39,positions=25,orders=10,order=25,activity=1'
+                     API_REPORT_DATABASE_URL=$REPORT_URL ;;
+    conn/bulkhead-timeout)
+                     MIX='account=39,positions=25,orders=10,order=25,activity=1'
+                     API_REPORT_DATABASE_URL=$REPORT_URL
+                     ROLE_SQL="ALTER ROLE report SET statement_timeout = '1s';" ;;
+    *) echo "unknown round $1/$2 (see: scripts/lab rounds $1)" >&2; exit 2 ;;
+  esac
+  export API_DATABASE_URL API_READ_DATABASE_URL API_REPORT_DATABASE_URL API_REQUEST_TIMEOUT
+}
+
+wait_api() {
+  for _ in $(seq 60); do
+    curl -fsS -o /dev/null http://127.0.0.1:58080/healthz 2>/dev/null && return 0
+    sleep 1
+  done
+  echo "api did not become healthy" >&2; "${DC[@]}" logs --tail 50 api >&2; exit 1
+}
+
+cmd_run() {
+  local scenario=$1 rnd=$2
+  round "$scenario" "$rnd"
+  local stamp; stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  local rel="$scenario/$rnd/$stamp" dir="results/$scenario/$rnd/$stamp"
+  mkdir -p "$dir"
+
+  psql_admin -c "ALTER ROLE app RESET ALL; ALTER ROLE batch RESET ALL; ALTER ROLE report RESET ALL; $ROLE_SQL"
+  "${DC[@]}" up -d --force-recreate api >/dev/null 2>&1
+  wait_api
+  # Role settings apply when a server connection starts, and PgBouncer keeps its
+  # server connections open, so close them: the next ones get this round's settings.
+  psql_admin -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('app','batch','report');" >/dev/null
+  psql_admin -c "SELECT pg_stat_statements_reset();" >/dev/null
+
+  cat >"$dir/meta.json" <<EOF
+{"scenario":"$scenario","round":"$rnd","rate":$RATE,"duration":"$DURATION","batch_at_s":$BATCH_AT,
+ "mix":"$MIX","batch_args":"${BATCH_ARGS//\"/\\\"}","role_sql":"${ROLE_SQL//\"/\\\"}",
+ "api_report_pool":"${API_REPORT_DATABASE_URL:+separate}","api_request_timeout":"$API_REQUEST_TIMEOUT",
+ "commit":"$(git rev-parse --short HEAD 2>/dev/null || echo none)","started_utc":"$stamp"}
+EOF
+
+  "${DC[@]}" run -d --rm --name pgpl-sampler tools /app/sampler -out "/results/$rel/sampler.csv" >/dev/null
+  local batch_pid=''
+  if [[ -n $BATCH_ARGS ]]; then
+    ( sleep "$BATCH_AT"
+      # shellcheck disable=SC2086
+      "${DC[@]}" run --rm tools /app/batch $BATCH_ARGS -out "/results/$rel/batch.json" >"$dir/batch.log" 2>&1 || true
+    ) & batch_pid=$!
+  fi
+  "${DC[@]}" run --rm tools /app/load -rate "$RATE" -duration "$DURATION" -mix "$MIX" \
+    -out "/results/$rel" 2>&1 | tee "$dir/load.log"
+  [[ -n $batch_pid ]] && wait "$batch_pid"
+  docker stop pgpl-sampler >/dev/null 2>&1 || true
+
+  psql_admin -F $'\t' -c "SELECT calls, round(total_exec_time::numeric,1) AS total_ms,
+      round(mean_exec_time::numeric,2) AS mean_ms, round(max_exec_time::numeric,1) AS max_ms,
+      left(regexp_replace(query, '\s+', ' ', 'g'), 120)
+    FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 15" >"$dir/pg_stat_statements.tsv"
+  "${DC[@]}" logs --since "$stamp" pg-primary 2>/dev/null | grep -E 'still waiting|acquired|deadlock|duration:' \
+    >"$dir/pg_log_excerpt.txt" || true
+  echo "results: $dir"
+}
+
+case "${1:-}" in
+  up)
+    mkdir -p results
+    "${DC[@]}" build
+    "${DC[@]}" up -d --wait pg-primary pgbouncer api ;;
+  seed)
+    "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v accounts="$ACCOUNTS" -v symbols="$SYMBOLS" \
+      -v orders="$ORDERS" -f /seed/seed.sql ;;
+  run)    [[ $# -eq 3 ]] || { echo "usage: $0 run <scenario> <round>" >&2; exit 2; }; cmd_run "$2" "$3" ;;
+  rounds) grep -oE "^ *$2/[a-z-]+\)" "$0" | sed -E "s/ *$2\/(.*)\)/\1/" ;;
+  psql)   "${DC[@]}" exec pg-primary psql -U postgres -d lab ;;
+  down)   "${DC[@]}" --profile tools down -v ;;
+  *) sed -n '2,13p' "$0"; exit 2 ;;
+esac

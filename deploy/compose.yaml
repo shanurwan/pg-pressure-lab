@@ -1,0 +1,77 @@
+# The lab. Ports bind to 127.0.0.1 only: authentication is "trust" inside this
+# network because it is a throwaway lab, never a pattern for anything real.
+#
+# Memory is capped per service so the lab fits beside other work on a shared
+# host and a run can be repeated on a laptop. CPU is not capped: compare rounds
+# run on the same host, not absolute numbers across machines.
+name: pgpl
+
+services:
+  pg-primary:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: lab
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - max_connections=200
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=200ms
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./postgres/seed.sql:/seed/seed.sql:ro
+    ports: ["127.0.0.1:55432:5432"]
+    mem_limit: 3g
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "lab"]
+      interval: 2s
+      retries: 30
+
+  pgbouncer:
+    build: ./pgbouncer
+    depends_on:
+      pg-primary: { condition: service_healthy }
+    ports: ["127.0.0.1:56432:6432"]
+    mem_limit: 256m
+
+  api:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    command: ["/app/api"]
+    environment:
+      DATABASE_URL: ${API_DATABASE_URL:-postgres://app@pgbouncer:6432/lab?pool_max_conns=40&default_query_exec_mode=exec}
+      READ_DATABASE_URL: ${API_READ_DATABASE_URL:-}
+      REPORT_DATABASE_URL: ${API_REPORT_DATABASE_URL:-}
+      REQUEST_TIMEOUT: ${API_REQUEST_TIMEOUT:-2s}
+    depends_on: [pgbouncer]
+    ports: ["127.0.0.1:58080:8080"]
+    mem_limit: 512m
+
+  # One image with every tool; drills run it with `docker compose run`.
+  tools:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    profiles: [tools]
+    volumes:
+      - ../results:/results
+    mem_limit: 1g
+
+volumes:
+  pgdata:
