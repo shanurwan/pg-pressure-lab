@@ -102,7 +102,8 @@ type run struct {
 	Meta          json.RawMessage `json:"meta"`
 	Summary       json.RawMessage `json:"summary"`
 	Batch         json.RawMessage `json:"batch"`
-	BatchWindow   *window         `json:"batch_window"`
+	BatchWindow   *window         `json:"batch_window"` // the job window, whatever the job
+	Job           string          `json:"job,omitempty"`
 	TopStatements []statement     `json:"top_statements"`
 	Headline      headline        `json:"headline"`
 	Frames        []frame         `json:"frames"`
@@ -135,7 +136,7 @@ func main() {
 		log.Fatal(err)
 	}
 	for _, sc := range scenarios {
-		if !sc.IsDir() || sc.Name() == "calibration" {
+		if !sc.IsDir() || sc.Name() == "calibration" || strings.HasPrefix(sc.Name(), "_") || strings.HasPrefix(sc.Name(), ".") {
 			continue
 		}
 		rounds, _ := os.ReadDir(filepath.Join(*results, sc.Name()))
@@ -216,6 +217,33 @@ func loadRun(dir, scenario, round, stamp string) (*run, error) {
 	if r.BatchWindow != nil {
 		addEvent(frames, int(r.BatchWindow.StartS), "batch_start")
 		addEvent(frames, int(math.Ceil(r.BatchWindow.EndS)), "batch_end")
+	}
+	// Other jobs (migrations, triggers, idle transactions...) are marked in
+	// events.jsonl by scripts/lab as <name>_start / <name>_end. The first
+	// start and the last end give the job window when there is no batch.json.
+	var jobStart, jobEnd *float64
+	for _, e := range readEvents(filepath.Join(dir, "events.jsonl"), loadStart) {
+		if r.BatchWindow != nil && (e.name == "batch_start" || e.name == "batch_end") {
+			continue
+		}
+		addEvent(frames, int(e.t), e.name)
+		v := e.t
+		switch {
+		case strings.HasSuffix(e.name, "_start") && jobStart == nil:
+			jobStart = &v
+			r.Job = strings.TrimSuffix(e.name, "_start")
+		case strings.HasSuffix(e.name, "_end"):
+			jobEnd = &v
+		}
+	}
+	if r.BatchWindow == nil && jobStart != nil {
+		end := *jobStart
+		if jobEnd != nil && *jobEnd > end {
+			end = *jobEnd
+		}
+		r.BatchWindow = &window{StartS: round1(*jobStart), EndS: round1(end)}
+	} else if r.BatchWindow != nil {
+		r.Job = "batch"
 	}
 	r.Frames = flatten(frames)
 	r.TopStatements = readStatements(filepath.Join(dir, "pg_stat_statements.tsv"))
@@ -384,6 +412,31 @@ func computeHeadline(frames []frame, w *window, summary json.RawMessage) headlin
 		}
 	}
 	return h
+}
+
+type event struct {
+	t    float64 // seconds from load start
+	name string
+}
+
+func readEvents(path string, loadStart time.Time) []event {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []event
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var e struct{ Wall, Event string }
+		if json.Unmarshal([]byte(line), &e) != nil || e.Event == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, e.Wall)
+		if err != nil {
+			continue
+		}
+		out = append(out, event{t: math.Max(0, ts.Sub(loadStart).Seconds()), name: e.Event})
+	}
+	return out
 }
 
 func readStatements(path string) []statement {

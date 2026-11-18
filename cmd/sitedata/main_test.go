@@ -98,3 +98,23 @@ func TestRecoveryNeedsTenHealthySeconds(t *testing.T) {
 		t.Fatalf("after %d during %d", *h.FailedAfterBatch, *h.FailedInBatch)
 	}
 }
+
+func TestJobWindowFromEvents(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "meta.json", `{"rate":300,"duration":"180s"}`)
+	write(t, dir, "summary.json", `{"started_at":"2026-11-18T04:00:00Z","ops":{"order":{"n":3,"ok":3,"p99_ms":5}}}`)
+	write(t, dir, "load.csv", "sec,op,n,ok,errors,p50_ms,p99_ms,max_ms,error_codes\n"+
+		"0,order,1,1,0,1.0,1.0,1.0,\n1,order,1,1,0,1.0,1.0,1.0,\n2,order,1,1,0,1.0,1.0,1.0,\n")
+	write(t, dir, "events.jsonl", `{"wall":"2026-11-18T04:00:01Z","event":"migration_start"}`+"\n"+
+		`{"wall":"2026-11-18T04:00:02Z","event":"migration_end"}`+"\n")
+	r, err := loadRun(dir, "migration", "alter-naive", "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Job != "migration" || r.BatchWindow == nil || r.BatchWindow.StartS != 1 || r.BatchWindow.EndS != 2 {
+		t.Fatalf("job window wrong: job %q window %+v", r.Job, r.BatchWindow)
+	}
+	if got := r.Frames[1].Events; len(got) != 1 || got[0] != "migration_start" {
+		t.Fatalf("events not placed: %v", got)
+	}
+}
