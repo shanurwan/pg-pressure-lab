@@ -8,6 +8,8 @@
 // Colours come from the CSS tokens (--vp-*), so the legend, the charts and
 // this view always agree.
 
+import { jobLabel } from "./data.js";
+
 const POOL = 40, SERVERS = 20, QUEUE_MAX = 40, BACKENDS = 24, PARTICLES = 480;
 const X = { clients: -10.5, api: -6.4, pool: -3.0, queue: 0.6, bouncer: 3.2, pg: 8.0 };
 
@@ -204,7 +206,7 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
     chains.geometry.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
     chains.geometry.computeBoundingSphere();
 
-    const jobName = run?.job || "job";
+    const jobName = jobLabel(run);
     L.clients.innerHTML = `clients<small>${mix.rate}/s</small>`;
     L.api.innerHTML = `API · Go<small>2 s deadline</small>`;
     L.pool.innerHTML = `pgx pool<small>${db.pool_acquired ?? "–"}/40 in use</small>`;
@@ -215,7 +217,7 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
     L.pg.classList.toggle("hot", wb > 0);
     // the job's state rides on the PostgreSQL label: a separate floating
     // label collided with it in short panels
-    if (inJob) L.pg.innerHTML += `<small class="jobline">${jobName} open ${Math.round(t - w.start_s)} s</small>`;
+    if (inJob) L.pg.innerHTML += `<small class="jobline">${jobName} running ${Math.round(t - w.start_s)} s</small>`;
     L.job.innerHTML = "";
     L.job.style.display = "none";
     L.job.classList.add("job");

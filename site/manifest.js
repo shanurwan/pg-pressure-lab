@@ -65,6 +65,10 @@ export const SIGNALS = {
   pg_sessions_started: { label: "New PostgreSQL sessions", unit: "/s" },
   pg_idle_in_tx: { label: "Sessions idle in transaction", unit: "" },
   pg_active: { label: "Active PostgreSQL sessions", unit: "" },
+  quotes_dead_tup: { label: "Dead row versions in quotes", unit: "" },
+  quotes_bytes: { label: "Size of quotes", unit: "B" },
+  oldest_xmin_age: { label: "Age of the oldest snapshot (xmin)", unit: "" },
+  int4_ids_left: { label: "int4 ids left", unit: "" },
 };
 
 export const SCENARIOS = [
@@ -127,127 +131,212 @@ export const SCENARIOS = [
     short: "Schema change on a hot table",
     summary: "A schema change needs a brief exclusive lock. Queued behind one long read, it blocks every query behind it. Then: building an index on a 20-million-row table without CONCURRENTLY.",
     sources: ["gocardless", "railway"], reading: [],
-    practise: ["Read the lock queue with pg_blocking_pids", "Use lock_timeout and retries for DDL", "Build indexes on big tables without blocking writes", "Explain why a 'fast' migration can still cause an outage"],
+    practise: ["Read a lock queue: who waits on whom", "Use lock_timeout and retries for DDL", "Build indexes on big tables without blocking writes", "Explain why a 'fast' migration can still cause an outage"],
     rounds: {
-      "alter-naive": "A long read transaction holds a lock on accounts; ALTER TABLE accounts ADD COLUMN waits for it, and every later query on accounts queues behind the ALTER.",
-      "alter-locktimeout": "Fix: the same ALTER with lock_timeout = 1 s and retries with backoff, so it gives up its place in the queue instead of blocking everyone.",
-      "index-plain": "CREATE INDEX on orders(symbol), 20 million rows: writes to orders wait for the whole build.",
-      "index-concurrently": "Fix: CREATE INDEX CONCURRENTLY: slower, but writes keep flowing.",
+      "alter-naive": "A long read transaction is open on accounts; ALTER TABLE accounts ADD COLUMN waits for it, and every later query on accounts queues behind the ALTER.",
+      "alter-locktimeout": "Fix: the same ALTER with lock_timeout = 1 s, retried with backoff, so it never holds the head of the queue for long.",
+      "index-plain": "CREATE INDEX on orders, 20 million rows, without CONCURRENTLY: writes to orders wait for the whole build.",
+      "index-concurrently": "Fix: CREATE INDEX CONCURRENTLY. Slower to build, but writes keep flowing.",
     },
-    incident() {
-      return `<p>GoCardless describe a migration whose DDL itself took milliseconds but needed an <strong>ACCESS EXCLUSIVE</strong> lock on a busy table. It queued behind a long-running read, and every query that arrived after it queued behind the DDL: about fifteen seconds of API timeouts. Railway's October 2025 incident is the bigger cousin: a non-concurrent index on a table of about a billion rows, connections piling up until even the admin reserve was gone.</p>`;
+    incident(ctx) {
+      return `<p>GoCardless describe a migration whose DDL took milliseconds but needed an <strong>ACCESS EXCLUSIVE</strong> lock on a busy table. It queued behind a long-running read, and every query that arrived after it queued behind the DDL: about fifteen seconds of API timeouts. Railway's October 2025 incident is the bigger cousin: a non-concurrent index on a table of about a billion rows, with connections piling up until even the admin reserve was gone.</p>
+      <p>The stack is the same as the batch mission: a Go API (pgx pool of 40) → PgBouncer (20 server connections) → PostgreSQL 17, under ${ctx.fmt.n(ctx.rate)} requests a second.</p>
+      ${CANCEL_NOTE}`;
     },
     reproduce(ctx) {
-      const f = ctx.range("alter-naive", "failed_pct", ctx.fmt.pct);
-      return `<p>The <strong>alter-naive</strong> round opens a long read on accounts, then runs an ALTER TABLE that needs a moment of exclusive access.</p>${f ? `<div class="callout bad"><p>Across ${ctx.count("alter-naive")} runs, <strong class="v-bad">${f}</strong> of requests failed while the ALTER waited in line.</p></div>` : ""}`;
+      const f = ctx.range("alter-naive", "failed_pct", ctx.fmt.pct), d = ctx.range("alter-naive", "batch_seconds", ctx.fmt.s);
+      return `<p>In <strong>alter-naive</strong> a read transaction on accounts stays open, then the migration runs <code>ALTER TABLE accounts ADD COLUMN</code>.</p>${f ? `<div class="callout bad"><p>Across ${ctx.count("alter-naive")} runs the migration window lasted ${d} and <strong class="v-bad">${f}</strong> of all requests failed, reads included.</p></div>` : ""}`;
     },
-    diagnose() {
-      return `<p>In a lock queue, a waiting ACCESS EXCLUSIVE request blocks every later request on the table, even plain reads that would not conflict with the long transaction. <code>pg_blocking_pids(pid)</code> shows the chain: readers blocked by the ALTER, the ALTER blocked by the long transaction.</p>`;
+    diagnose(ctx) {
+      const ip = ctx.range("index-plain", "failed_pct", ctx.fmt.pct), ipd = ctx.range("index-plain", "batch_seconds", ctx.fmt.s);
+      const late = ctx.countWhere("index-plain", (h) => h.failed_after_batch > 0), lateN = ctx.range("index-plain", (h) => (h.failed_after_batch > 0 ? h.failed_after_batch : null), ctx.fmt.n);
+      return `<p><strong>The ALTER itself is fast; its place in the queue is not.</strong> A waiting ACCESS EXCLUSIVE request blocks every later request on the table, even plain reads that would not conflict with the long transaction. <code>pg_blocking_pids(pid)</code> shows the chain: readers blocked by the ALTER, the ALTER blocked by the long read.</p>
+      ${ip ? `<p><strong>A plain index build is the same problem, held for longer.</strong> <code>CREATE INDEX</code> blocks writes for the whole build: ${ipd} of building here, and ${ip} of all requests failed.${late ? ` In ${late} of ${ctx.count("index-plain")} runs failures carried on after the build finished (${lateN} requests).` : ""}</p>` : ""}`;
     },
     fix(ctx) {
-      const lt = ctx.range("alter-locktimeout", "failed_pct", ctx.fmt.pct), ic = ctx.range("index-concurrently", "failed_pct", ctx.fmt.pct), ip = ctx.range("index-plain", "failed_pct", ctx.fmt.pct);
-      return `<ul>${[lt && `<li><strong>lock_timeout + retry:</strong> ${lt} failed.</li>`, ip && ic && `<li><strong>CREATE INDEX CONCURRENTLY</strong> instead of a plain build: ${ic} failed, against ${ip}.</li>`].filter(Boolean).join("")}</ul>`;
+      const lt = ctx.range("alter-locktimeout", "failed_pct", ctx.fmt.pct), ltp = ctx.range("alter-locktimeout", "order_p99_ms", ctx.fmt.ms);
+      const ic = ctx.range("index-concurrently", "failed_pct", ctx.fmt.pct), icp = ctx.range("index-concurrently", "order_p99_ms", ctx.fmt.ms), icd = ctx.range("index-concurrently", "batch_seconds", ctx.fmt.s);
+      return `<ul>${[
+        lt && `<li><strong>lock_timeout + retries for DDL:</strong> <span class="v-ok">${lt}</span> failed. The cost was an order p99 of ${ltp} while the ALTER kept trying.</li>`,
+        ic && `<li><strong>CREATE INDEX CONCURRENTLY:</strong> <span class="v-ok">${ic}</span> failed and order p99 ${icp}, for a build of ${icd}.</li>`,
+      ].filter(Boolean).join("")}</ul>`;
     },
-    alert(ctx) { return `<p>Watch for DDL waiting on a lock and for any transaction older than your migration budget before you start one.</p>${ctx.signalsSentence()}`; },
+    alert(ctx) { return `<p>Before a migration, check for transactions older than its lock budget. During one, alert on sessions waiting on a lock.</p>${ctx.signalsSentence()}`; },
   },
 
   {
     id: "retry", ready: true, minutes: 20, primary: "retry-immediate", fixes: ["retry-backoff-budget", "no-retry"],
     title: "Retries that kept the outage alive",
     short: "Client retry storm",
-    summary: "A short stall makes clients retry immediately. The retries multiply the load, and the system stays down after the stall is gone.",
+    summary: "A 15-second lock makes requests fail. Clients that retry at once multiply the load, and the API can stay down after the lock is gone.",
     sources: ["aws2021", "alpaca24jun"], reading: ["bronson"],
-    practise: ["Recognise work amplification from retries", "Design retry budgets and jittered backoff", "Explain metastability to a non-specialist"],
+    practise: ["Recognise work amplification from retries", "Design retry budgets and backoff", "Explain metastability to a non-specialist"],
+    tiles: ["ok", "p99", "retries", "refused", "pool", "queue", "locks", "failed"],
     rounds: {
-      "no-retry": "Clients do not retry. The reference for the same short trigger.",
-      "retry-immediate": "Clients retry failed requests immediately, several times.",
-      "retry-backoff-budget": "Fix: jittered exponential backoff with a retry budget, so retries can never be more than a small share of traffic.",
+      "no-retry": "Clients do not retry. The reference for the same 15 s lock on accounts.",
+      "retry-immediate": "Clients retry a failed request immediately, up to three times.",
+      "retry-backoff-budget": "Fix: up to three retries with exponential backoff, and a retry budget of 10% of traffic.",
     },
-    incident() {
-      return `<p>AWS's December 2021 us-east-1 event is the textbook case: clients that did not back off kept retrying connections, and the retries kept internal network devices overloaded long after the original trigger. Bronson et al. call this a <em>sustaining effect</em>: the work the system does because it is failing keeps it failing.</p>`;
+    incident(ctx) {
+      // the lock transaction's own age, not the job's start-to-end events
+      const d = ctx.range("no-retry", "max_longest_xact_s", ctx.fmt.s);
+      return `<p>AWS's December 2021 us-east-1 event is the textbook case: clients that did not back off kept retrying, and the retries kept internal network devices overloaded long after the original trigger. Bronson et al. call this a <em>sustaining effect</em>: work the system does because it is failing keeps it failing. Alpaca's 24 June 2026 status note, linked below, describes inbound connections exceeding capacity.</p>
+      <p>Every round here has the same trigger: an exclusive lock on accounts${d ? ` held for ${d}` : ""}. The only difference is what clients do when a request fails.</p>
+      ${CANCEL_NOTE}`;
     },
     reproduce(ctx) {
-      const f = ctx.range("retry-immediate", "failed_pct", ctx.fmt.pct);
-      return `<p>The trigger is short. The difference between rounds is only what clients do when a request fails.</p>${f ? `<div class="callout bad"><p>With immediate retries, <strong class="v-bad">${f}</strong> of requests failed across ${ctx.count("retry-immediate")} runs.</p></div>` : ""}`;
+      const f = ctx.range("retry-immediate", "failed_pct", ctx.fmt.pct), n = ctx.range("no-retry", "failed_pct", ctx.fmt.pct);
+      const never = ctx.countWhere("retry-immediate", (h) => h.batch_seconds != null && h.failed > 0 && h.recovered_s === null);
+      return `<p>Without retries, <strong>${n}</strong> of requests failed. With immediate retries, <strong class="v-bad">${f}</strong> failed across ${ctx.count("retry-immediate")} runs${never ? `, and in ${never} of them the API never got back to ten healthy seconds before the run ended` : ""}.</p>`;
     },
-    diagnose() { return "<p>Compare offered load to original load: when retries are a large share of what the server sees, the server spends its capacity on requests that are already doomed.</p>"; },
+    diagnose(ctx) {
+      const sent = ctx.range("retry-immediate", "retries_sent", ctx.fmt.n), after = ctx.range("retry-immediate", "failed_after_batch", ctx.fmt.n);
+      return `<p><strong>Retries are extra work sent to a system that is already failing.</strong> Immediate retries added ${sent} requests on top of the original traffic. Each lands while the backlog is still draining, waits out its deadline and fails, and so triggers another retry.</p>${after ? `<p>${after} requests failed <em>after</em> the lock was gone. Same trigger, same API: the only difference is the clients.</p>` : ""}`;
+    },
     fix(ctx) {
-      const b = ctx.range("retry-backoff-budget", "failed_pct", ctx.fmt.pct), n = ctx.range("no-retry", "failed_pct", ctx.fmt.pct);
-      return `<ul>${[b && `<li><strong>Backoff + retry budget:</strong> ${b} failed.</li>`, n && `<li><strong>No retries:</strong> ${n} failed.</li>`].filter(Boolean).join("")}</ul>`;
+      const b = ctx.range("retry-backoff-budget", "failed_pct", ctx.fmt.pct), bs = ctx.range("retry-backoff-budget", "retries_sent", ctx.fmt.n), bd = ctx.range("retry-backoff-budget", "retries_denied", ctx.fmt.n), br = ctx.range("retry-backoff-budget", "recovered_s", ctx.fmt.s);
+      const n = ctx.range("no-retry", "failed_pct", ctx.fmt.pct);
+      return `<ul>${[
+        b && `<li><strong>Backoff with a retry budget</strong> behaves like no retries at all, which is the point: the budget allowed ${bs} retries and refused ${bd}; ${b} failed, healthy within ${br} of the lock ending.</li>`,
+        n && `<li><strong>No retries:</strong> ${n} failed, all of them during the lock.</li>`,
+      ].filter(Boolean).join("")}</ul>`;
     },
-    alert(ctx) { return `<p>Track the ratio of retried to original requests at the client and at the edge.</p>${ctx.signalsSentence()}`; },
+    alert(ctx) { return `<p>Track retries as a share of original requests, at the client and at the edge. A budget makes that share a hard limit instead of a graph.</p>${ctx.signalsSentence()}`; },
+  },
+
+  {
+    id: "conn", ready: true, minutes: 15, primary: "shared", fixes: ["bulkhead", "bulkhead-timeout"],
+    title: "One slow report, every endpoint slow",
+    short: "Slow query in a shared pool",
+    summary: "A few slow report queries share the connection pool with everything else. Every endpoint queues behind them.",
+    sources: ["railway", "alpaca27jun"], reading: [],
+    practise: ["Design bulkheads for connection pools", "Use per-role statement_timeout", "Read pool saturation from the app and from PgBouncer"],
+    rounds: {
+      baseline: "No report traffic.",
+      shared: "3 requests in 100 are a slow report that shares the API's connection pool.",
+      bulkhead: "Fix: reports get their own pool of three connections.",
+      "bulkhead-timeout": "Fix: the bulkhead plus statement_timeout = 1 s for reports.",
+    },
+    incident(ctx) {
+      return `<p>Railway's October 2025 incident shows the extreme: long-running work took connection slots until nothing else could get one. Alpaca's 27 June 2026 status note (linked below) attributes order timeouts to database connection pressure.</p>
+      <p>Here a slow report shares the API's pool of 40 connections with orders and reads, under ${ctx.fmt.n(ctx.rate)} requests a second.</p>`;
+    },
+    reproduce(ctx) {
+      const bo = ctx.range("baseline", "order_p99_ms", ctx.fmt.ms), so = ctx.range("shared", "order_p99_ms", ctx.fmt.ms), sr = ctx.range("shared", "read_p99_ms", ctx.fmt.ms);
+      return `<p>Replay <strong>baseline</strong>, then <strong>shared</strong>, and compare the p99 tile.</p>${so ? `<div class="callout bad"><p>Order p99 went from ${bo} to <strong class="v-bad">${so}</strong> with reports sharing the pool; read p99 ${sr}.</p></div>` : ""}`;
+    },
+    diagnose() {
+      return `<p>A pool is a queue. A slow query holds its connection for its whole runtime, so a small share of slow requests takes a large share of the connections, and every fast request waits behind them. The pool tile and the PgBouncer queue show it; the database itself is not busy.</p>`;
+    },
+    fix(ctx) {
+      const bo = ctx.range("bulkhead", "order_p99_ms", ctx.fmt.ms), br = ctx.range("bulkhead", "read_p99_ms", ctx.fmt.ms), bf = ctx.range("bulkhead", "failed_pct", ctx.fmt.pct), sf = ctx.range("shared", "failed_pct", ctx.fmt.pct);
+      const to = ctx.range("bulkhead-timeout", "order_p99_ms", ctx.fmt.ms), tf = ctx.range("bulkhead-timeout", "failed_pct", ctx.fmt.pct);
+      return `<ul>${[
+        bo && `<li><strong>A bulkhead</strong> gives the other endpoints their latency back: order p99 ${bo}, reads ${br}. The price is paid by the reports, which now queue among themselves: ${bf} of requests failed, against ${sf} when shared. The per-endpoint summary at the end of <code>lab run conn bulkhead</code> shows which ones.</li>`,
+        to && `<li><strong>statement_timeout on top</strong> changed little here (order p99 ${to}, ${tf} failed): it guards against the report that suddenly takes a minute, it does not fix queueing.</li>`,
+      ].filter(Boolean).join("")}</ul>`;
+    },
+    alert(ctx) { return `<p>Alert on pool wait time per endpoint, not just pool usage: a full pool with fast queries is fine, a full pool with one slow class of query is not.</p>${ctx.signalsSentence()}`; },
   },
 
   {
     id: "xmin", ready: true, minutes: 20, primary: "idle-tx", fixes: ["idle-tx-timeout"],
-    title: "The idle transaction that slowed everything down",
+    title: "The idle transaction that bloated a table",
     short: "xmin horizon and bloat",
-    summary: "One session left idle in a transaction holds back vacuum. Dead rows pile up on a hot table and reads slow down for everyone.",
+    summary: "One session left idle in a transaction holds back VACUUM. Dead rows pile up on a hot table. Nothing fails; it is slow damage.",
     sources: ["trigger", "sentry2015", "mandrill"], reading: [],
-    practise: ["Find what is holding back the xmin horizon", "Explain MVCC, vacuum and dead tuples", "Set idle_in_transaction_session_timeout with confidence"],
+    practise: ["Find what is holding back the xmin horizon", "Explain MVCC, VACUUM and dead tuples", "Set idle_in_transaction_session_timeout with confidence"],
+    tiles: ["ok", "p99", "xact", "dead", "tblmb", "xminage", "locks", "sess"],
     rounds: {
-      baseline: "No idle transaction: vacuum keeps the hot table small.",
-      "idle-tx": "A session opens a transaction and goes idle, holding the xmin horizon while the hot table keeps being updated.",
-      "idle-tx-timeout": "Fix: idle_in_transaction_session_timeout ends the idle session, and vacuum can clean up again.",
+      baseline: "A churn job keeps updating a 2,000-row quotes table while the API reads it. No idle transaction.",
+      "idle-tx": "The same, plus a session that opens a transaction and sits idle, holding its snapshot.",
+      "idle-tx-timeout": "Fix: idle_in_transaction_session_timeout = 10 s. PostgreSQL ends the idle session; the job that opened it keeps its own timer, so the shaded window is longer than the transaction (watch Oldest transaction).",
     },
     incident() {
-      return `<p>Trigger.dev saw a held-back xmin horizon leave hundreds of thousands of dead tuples on a hot table, with CPU pinned for hours. Taken to its limit, the same mechanism is how Sentry (2015) and Mandrill (2019) reached transaction ID wraparound protection and stopped taking writes.</p>`;
+      return `<p>Trigger.dev saw a held-back xmin horizon leave hundreds of thousands of dead tuples on a hot table, with CPU pinned for hours, until a failover cleared it. Taken to its limit, the same mechanism is how Sentry (2015) and Mandrill (2019) reached transaction ID wraparound protection and stopped taking writes.</p>
+      <p>Nothing fails in this mission. Watch the tables tiles: dead row versions, the size of quotes, and the age of the oldest snapshot.</p>`;
     },
     reproduce(ctx) {
-      const f = ctx.range("idle-tx", "read_p99_ms", ctx.fmt.ms);
-      return `<p>A hot table is updated continuously while one session sits idle in a transaction.</p>${f ? `<div class="callout bad"><p>Read p99 with the idle transaction: <strong>${f}</strong>.</p></div>` : ""}`;
+      const dt = ctx.range("idle-tx", "max_dead_tup", ctx.fmt.n), mb = ctx.range("idle-tx", "max_table_bytes", fmtMB), bdt = ctx.range("baseline", "max_dead_tup", ctx.fmt.n), bmb = ctx.range("baseline", "max_table_bytes", fmtMB);
+      return `<p>A churn job updates quotes continuously while one session sits idle in a transaction.</p>${dt ? `<div class="callout bad"><p>With the idle session, quotes reached <strong class="v-bad">${dt}</strong> dead row versions and ${mb}, against ${bdt} and ${bmb} without it.</p></div>` : ""}`;
     },
-    diagnose() { return "<p>Look for the oldest <code>backend_xmin</code> in pg_stat_activity, replication slots and prepared transactions; compare dead tuples on the hot table to live ones.</p>"; },
-    fix(ctx) { const t = ctx.range("idle-tx-timeout", "read_p99_ms", ctx.fmt.ms); return t ? `<p>With the timeout, read p99 was <strong>${t}</strong>.</p>` : "<p>See the rounds table.</p>"; },
-    alert(ctx) { return `<p>Alert on the age of the oldest xmin and on dead tuples on the tables you care about.</p>${ctx.signalsSentence()}`; },
+    diagnose(ctx) {
+      const age = ctx.range("idle-tx", "max_xmin_age", ctx.fmt.n);
+      return `<p>VACUUM can only remove a row version that no open snapshot can still see. An idle transaction keeps its snapshot, so every update to quotes leaves a dead version that has to stay. <code>age(backend_xmin)</code> in <code>pg_stat_activity</code> shows who is holding the horizon${age ? `; here it reached ${age} transactions` : ""}. Reads of quotes get slower as they step over the dead versions.</p>`;
+    },
+    fix(ctx) {
+      const x = ctx.range("idle-tx-timeout", "max_longest_xact_s", ctx.fmt.s), dt = ctx.range("idle-tx-timeout", "max_dead_tup", ctx.fmt.n), mb = ctx.range("idle-tx-timeout", "max_table_bytes", fmtMB);
+      return x ? `<p><strong>idle_in_transaction_session_timeout</strong> caps the damage: the idle session was ended after ${x}, dead rows peaked at ${dt} and were reclaimed, and quotes stayed at ${mb}.</p>` : "";
+    },
+    alert(ctx) {
+      const age = ctx.range("idle-tx", "max_xmin_age", ctx.fmt.n);
+      return `<p>Alert on the age of the oldest <code>backend_xmin</code>${age ? ` (it reached ${age} here in under three minutes)` : ""} and on <code>n_dead_tup</code> for the tables you care about. Both are cheap to sample.</p>`;
+    },
   },
 
   {
-    id: "overflow", ready: true, minutes: 15, primary: "overflow", fixes: [],
+    id: "overflow", ready: true, minutes: 15, primary: "int4", fixes: ["bigint"],
     title: "When an id ran out of integers",
     short: "int4 key overflow",
     summary: "A bigint primary key referenced by an int4 column works for years, then every insert fails at 2,147,483,647.",
     sources: ["buildkite"], reading: [],
-    practise: ["Audit for int4 columns referencing bigint keys", "Alert on percent of id range used", "Plan the bigint migration before the cliff"],
-    rounds: { overflow: "The sequence is close to 2^31; an int4 column that references the order id overflows mid-run." },
-    incident() { return "<p>Buildkite's July 2023 incident: the primary key was already bigint, but a foreign key column was int4. It overflowed at 2,147,483,647 and new jobs stopped for about an hour and a half.</p>"; },
-    reproduce() { return "<p>Orders are written at a steady rate; partway through the run the id passes the int4 limit.</p>"; },
-    diagnose() { return "<p>The error is <code>integer out of range</code> on insert. The fix is not the sequence, it's the column type of everything that stores the id.</p>"; },
-    fix() { return "<p>Convert referencing columns to bigint ahead of time (online, with a new column and backfill), or as an emergency workaround, move the sequence to negative values.</p>"; },
-    alert(ctx) { return `<p>Alert at a fraction of the int4 range used, for every int4 column that stores an id.</p>${ctx.signalsSentence()}`; },
-  },
-
-  {
-    id: "hotrow", ready: true, minutes: 15, primary: "hot", fixes: [],
-    title: "One account, every order",
-    short: "Hot-row lock contention",
-    summary: "When many writes hit the same row, they queue on its lock. Throughput collapses even though the database is otherwise idle.",
-    sources: ["heroku2019"], reading: [],
-    practise: ["Spot tuple-lock queues in pg_locks", "Redesign a hot counter as an append-only ledger", "Reason about SKIP LOCKED and sharded counters"],
-    rounds: { hot: "A share of orders all update the same omnibus account row." },
-    incident() { return "<p>Heroku describe parallel UPDATEs on the same row queuing on its lock, some for days, with job processing dropping to almost zero.</p>"; },
-    reproduce() { return "<p>Orders keep arriving; a share of them update one shared account row.</p>"; },
-    diagnose() { return "<p>Lock waits on a single tuple: <code>pg_locks</code> with locktype = 'tuple' or transactionid, many waiters, one holder at a time.</p>"; },
-    fix() { return "<p>Stop updating the row: write an append-only ledger and aggregate, or shard the counter.</p>"; },
-    alert(ctx) { return `<p>Lock waiters concentrated on one relation and one row.</p>${ctx.signalsSentence()}`; },
-  },
-
-  {
-    // Not ready: its recorded runs are being re-recorded with a report query
-    // that can finish on its own. Flip `ready` once results/conn is redone.
-    id: "conn", ready: false, minutes: 15, primary: "shared", fixes: ["bulkhead", "bulkhead-timeout"],
-    title: "One slow report, every endpoint slow",
-    short: "Shared pool exhaustion",
-    summary: "A rare, slow query shares the connection pool with everything else. Under load it holds connections and every endpoint queues behind it.",
-    sources: ["alpaca27jun", "railway"], reading: [],
-    practise: ["Design bulkheads for connection pools", "Use per-role statement_timeout", "Read pool saturation from the app and from PgBouncer"],
+    practise: ["Audit for int4 columns that store bigint keys", "Turn ids-left into a date", "Plan the bigint migration before the cliff"],
+    tiles: ["ok", "p99", "int4", "failed", "pool", "queue", "locks", "sess"],
     rounds: {
-      baseline: "No report traffic.", shared: "1 request in 100 is a slow report on the shared pool.",
-      bulkhead: "Fix: reports get their own three-connection pool.", "bulkhead-timeout": "Fix: plus statement_timeout for the report role.",
+      int4: "Order ids start a few thousand below 2,147,483,647, and a column that stores the order id is int4.",
+      bigint: "Fix: the same, with that column as bigint.",
     },
-    incident() { return "<p>Order timeouts from database connection pressure (Alpaca, 27 June 2026) and connection slots exhausted by long-running work (Railway, October 2025).</p>"; },
-    reproduce() { return "<p>See the rounds.</p>"; }, diagnose() { return ""; }, fix() { return ""; },
-    alert(ctx) { return ctx.signalsSentence(); },
+    incident() {
+      return `<p>Buildkite's July 2023 incident: the primary key was already bigint, but a column that referenced it was int4. It overflowed at 2,147,483,647 and new jobs stopped for about an hour and a half until a workaround shipped.</p>
+      <p>Watch the <strong>int4 ids left</strong> tile: it counts down with every order.</p>`;
+    },
+    reproduce(ctx) {
+      const ff = ctx.range("int4", "first_failure_s", (v) => `second ${v}`), f = ctx.range("int4", "failed_pct", ctx.fmt.pct);
+      return `<p>Orders are written at a steady rate until the id passes the int4 limit.</p>${ff ? `<div class="callout bad"><p>The first failure came at ${ff}, and every order after it failed: <strong class="v-bad">${f}</strong> of all requests.</p></div>` : ""}`;
+    },
+    diagnose() {
+      return `<p>The error is <code>integer out of range</code> on insert. The sequence is fine; the problem is the type of every column that <em>stores</em> the id. Nothing degrades beforehand: the API is healthy until the second it is not.</p>`;
+    },
+    fix(ctx) {
+      const b = ctx.range("bigint", "failed_pct", ctx.fmt.pct);
+      return `<p>${b ? `With the column as <strong>bigint</strong>: <span class="v-ok">${b}</span> failed. ` : ""}Convert referencing columns ahead of time (new column, backfill, swap). In an emergency, a sequence can be moved to negative values to buy time.</p>`;
+    },
+    alert() {
+      return `<p>The warning is a subtraction: <code>2147483647 - last_value</code> divided by the insert rate is the date this happens. In production that number is months, which is why it gets forgotten. Alert on it for every int4 column that stores an id.</p>`;
+    },
+  },
+
+  {
+    id: "hotrow", ready: true, minutes: 15, primary: "hot", fixes: ["hot-locklast"],
+    title: "Every order on one account row",
+    short: "Hot-row tipping point",
+    summary: "When most writes lock the same row, they queue on it. Sometimes the API absorbs it; sometimes it tips over. This mission was recorded twice and it went both ways.",
+    sources: ["heroku2019"], reading: [],
+    practise: ["Spot a single-row lock queue", "Recognise a system near its tipping point", "Take a hot lock last, not first"],
+    rounds: {
+      baseline: "Orders spread across accounts.",
+      hot: "Every order (60% of the traffic) updates the same account row, locking it first.",
+      "hot-locklast": "Fix: record the order first and reserve buying power with one conditional UPDATE just before COMMIT, so the row is locked for the shortest time.",
+    },
+    incident() {
+      return `<p>Heroku describe parallel UPDATEs on the same row queuing on its lock, with job processing dropping to almost nothing.</p>
+      <p><strong>A note on this mission:</strong> it only half reproduced. The <em>hot</em> round was recorded twice and the two runs disagree. Treat it as a picture of a tipping point, not a stable result.</p>`;
+    },
+    reproduce(ctx) {
+      const hs = ctx.list("hot");
+      const ok = hs.filter((h) => h.failed_pct === 0), bad = hs.filter((h) => h.failed_pct > 0);
+      const okTxt = ok.map((h) => `order p99 ${ctx.fmt.ms(h.order_p99_ms)} with ${h.max_lock_wait} sessions waiting on the row`).join("; ");
+      const badTxt = bad.map((h) => `${ctx.fmt.pct(h.failed_pct)} of all requests failed`).join("; ");
+      return `<p>Of ${hs.length} recorded runs of <strong>hot</strong>, ${ok.length} absorbed the load (${okTxt || "none"}) and ${bad.length} tipped over (${badTxt || "none"}).</p><p class="faint"><code>lab run hotrow hot</code> replays the newest run. To see the other, list them with <code>lab runs hotrow</code> and replay one with <code>lab run hotrow hot --stamp &lt;stamp&gt;</code>.</p>`;
+    },
+    diagnose() {
+      return `<p>One row, one lock holder at a time: every other order waits on it while holding a pool connection. When the queue stays short, latency rises and nothing fails. When it doesn't, requests reach their deadline, connections are torn down, and the API falls into the same reconnect loop as the batch mission. The difference between the two runs is small timing, which is what a tipping point looks like.</p>`;
+    },
+    fix(ctx) {
+      const f = ctx.range("hot-locklast", "failed_pct", ctx.fmt.pct), p = ctx.range("hot-locklast", "order_p99_ms", ctx.fmt.ms);
+      return f ? `<p><strong>Take the hot lock last.</strong> Across ${ctx.count("hot-locklast")} runs: <span class="v-ok">${f}</span> failed, order p99 ${p}. Less time holding the lock means a shorter queue behind it.</p>` : "";
+    },
+    alert() { return `<p>Lock waiters concentrated on one relation and one row. The useful signal is the queue length, before latency turns into failures.</p>`; },
   },
 ];
 
@@ -263,9 +352,13 @@ export const STEPS = [
 // (baseline, incident, first-signal quiz, fix, best-fix quiz, report) built
 // from its rounds. Types:
 //   command  completes when the terminal runs a matching command
-//   observe  completes when the replay reaches a moment
-//   quiz     multiple choice; `quiz: "firstSignal" | "bestFix"` take their
-//            options and the right answer from the recorded runs
+//   observe  completes when the replay reaches a moment: { round, when:
+//            "jobEnd" | "jobStart" | "failure" | "metric", offset (s),
+//            needFailures, metric + gte }
+//   quiz     multiple choice. Fixed: q, options, answer, explain(ctx).
+//            From the data: build({ ctx, load }) returns the same shape,
+//            where load(round) resolves that round's replayed run; or
+//            `quiz: "firstSignal" | "bestFix"`
 export const OBJECTIVES = {
   batch: [
     { id: "baseline", type: "command", xp: 50, text: "Run the baseline: the same traffic with no batch job", match: { run: ["baseline"] } },
@@ -291,4 +384,162 @@ export const OBJECTIVES = {
     { id: "best", type: "quiz", quiz: "bestFix", xp: 100 },
     { id: "report", type: "command", xp: 50, text: "Compare every round: lab report batch", match: { report: true } },
   ],
+  migration: [
+    { id: "outage", type: "command", xp: 50, text: "Run the migration: replay alter-naive", match: { run: ["alter-naive"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch reads fail while the ALTER waits in the queue", observe: { round: "alter-naive", when: "failure", offset: 3 }, hint: "Replay alter-naive and watch the Success tile once the migration starts." },
+    {
+      id: "why", type: "quiz", xp: 100, badge: "root-cause",
+      q: "ADD COLUMN takes milliseconds, and the long read only reads. Why did reads on accounts fail?",
+      options: [
+        "ADD COLUMN rewrote the whole table",
+        "The waiting ALTER queued for an ACCESS EXCLUSIVE lock, and every later query on the table queued behind it",
+        "PgBouncer refused new clients during DDL",
+        "The long read held an exclusive lock",
+      ],
+      answer: 1,
+      explain: (ctx) => `Lock requests queue in order. The ALTER waits for the long read; reads that arrive after the ALTER wait for the ALTER, even though they would not conflict with the read. ${ctx.range("alter-naive", "failed_pct", ctx.fmt.pct) ?? ""} of requests failed in that queue.`,
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay alter-locktimeout", match: { run: ["alter-locktimeout"] } },
+    { id: "index", type: "command", xp: 50, text: "Now the index: replay index-plain", match: { run: ["index-plain"] } },
+    {
+      id: "best", type: "quiz", xp: 100,
+      async build({ ctx }) {
+        const worst = (r) => Math.max(...ctx.list(r).map((h) => h.failed_pct));
+        const p = worst("index-plain"), c = worst("index-concurrently");
+        const opts = ["CREATE INDEX (plain)", "CREATE INDEX CONCURRENTLY", "Both", "Neither"];
+        const answer = p === 0 && c === 0 ? 2 : c === 0 ? 1 : p === 0 ? 0 : 3;
+        return {
+          q: "Which index build kept every request succeeding, in every recorded run?", options: opts, answer,
+          explain: `Plain build: ${ctx.range("index-plain", "failed_pct", ctx.fmt.pct)} failed. CONCURRENTLY: ${ctx.range("index-concurrently", "failed_pct", ctx.fmt.pct)} failed, with a build of ${ctx.range("index-concurrently", "batch_seconds", ctx.fmt.s)}.`,
+        };
+      },
+    },
+    { id: "fix2", type: "command", xp: 100, text: "Ship the fix: replay index-concurrently", match: { run: ["index-concurrently"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report migration", match: { report: true } },
+  ],
+
+  retry: [
+    { id: "baseline", type: "command", xp: 50, text: "Run the reference: the same 15 s lock, no retries", match: { run: ["no-retry"] } },
+    { id: "outage", type: "command", xp: 50, text: "Turn on immediate retries: replay retry-immediate", match: { run: ["retry-immediate"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch the lock end and the failures carry on", observe: { round: "retry-immediate", when: "jobEnd", offset: 8, needFailures: true }, hint: "Replay retry-immediate past the end of the lock. Watch Retries/s and Success." },
+    {
+      id: "never", type: "quiz", xp: 100, badge: "root-cause",
+      async build({ ctx }) {
+        const rounds = ["no-retry", "retry-immediate", "retry-backoff-budget"].filter((r) => ctx.has(r));
+        const never = rounds.filter((r) => ctx.list(r).some((h) => h.batch_seconds != null && h.failed > 0 && h.recovered_s === null));
+        const after = (r) => Math.max(...ctx.list(r).map((h) => h.failed_after_batch ?? 0));
+        const correct = never.length === 1 ? never[0] : rounds.slice().sort((a, b) => after(b) - after(a))[0];
+        return {
+          q: never.length === 1 ? "Which client policy, in at least one run, never got the API back to healthy before the run ended?" : "Which client policy left the most failures after the lock ended?",
+          options: rounds, answer: rounds.indexOf(correct),
+          explain: rounds.map((r) => `${r}: ${ctx.range(r, "failed_after_batch", ctx.fmt.n) ?? "–"} failed after the lock`).join(" · ") + `. Immediate retries sent ${ctx.range("retry-immediate", "retries_sent", ctx.fmt.n)} extra requests into a system that was already behind.`,
+        };
+      },
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay retry-backoff-budget", match: { run: ["retry-backoff-budget"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report retry", match: { report: true } },
+  ],
+
+  conn: [
+    { id: "baseline", type: "command", xp: 50, text: "Run the baseline: no reports", match: { run: ["baseline"] } },
+    { id: "outage", type: "command", xp: 50, text: "Add slow reports to the shared pool: replay shared", match: { run: ["shared"] } },
+    {
+      id: "ratio", type: "quiz", xp: 100,
+      async build({ ctx }) {
+        const avg = (r) => { const v = ctx.list(r).map((h) => h.order_p99_ms); return v.reduce((a, b) => a + b, 0) / v.length; };
+        const x = avg("shared") / avg("baseline");
+        return bucket("With reports sharing the pool, how much higher was order p99 than in the baseline?", x,
+          [{ lt: 1.5, label: "About the same" }, { lt: 5, label: "2 to 5 times" }, { lt: 40, label: "About 10 times" }, { lt: Infinity, label: "100 times or more" }],
+          `Order p99: ${ctx.range("baseline", "order_p99_ms", ctx.fmt.ms)} in the baseline, ${ctx.range("shared", "order_p99_ms", ctx.fmt.ms)} with reports sharing the pool (${x.toFixed(1)}× on average). Orders never touch the report's tables; they wait for a connection.`);
+      },
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay bulkhead", match: { run: ["bulkhead"] } },
+    {
+      id: "why", type: "quiz", xp: 100, badge: "root-cause",
+      q: "The bulkhead round failed more requests than shared. Why is it still the fix?",
+      options: [
+        "It isn't: shared is better",
+        "The failures moved to the reports, which now queue on their own connections, and every other endpoint got its latency back",
+        "Fewer requests were sent in the bulkhead round",
+        "statement_timeout cancelled the slow reports",
+      ],
+      answer: 1,
+      explain: (ctx) => `Bulkhead: ${ctx.range("bulkhead", "failed_pct", ctx.fmt.pct)} failed against ${ctx.range("shared", "failed_pct", ctx.fmt.pct)} shared, but order p99 fell to ${ctx.range("bulkhead", "order_p99_ms", ctx.fmt.ms)}. The per-endpoint summary at the end of the replay shows the failures are the reports' own.`,
+    },
+    { id: "fix2", type: "command", xp: 50, text: "Add statement_timeout: replay bulkhead-timeout", match: { run: ["bulkhead-timeout"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report conn", match: { report: true } },
+  ],
+
+  xmin: [
+    { id: "baseline", type: "command", xp: 50, text: "Run the baseline: the churn job, no idle transaction", match: { run: ["baseline"] } },
+    { id: "outage", type: "command", xp: 50, text: "Leave a transaction idle: replay idle-tx", match: { run: ["idle-tx"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch dead row versions pass 100,000", observe: { round: "idle-tx", when: "metric", metric: "quotes_dead_tup", gte: 100000 }, hint: "Replay idle-tx and watch the Dead tuples tile climb while the session stays idle." },
+    {
+      id: "ratio", type: "quiz", xp: 100,
+      async build({ ctx }) {
+        const avg = (r) => { const v = ctx.list(r).map((h) => h.max_table_bytes || 0); return v.reduce((a, b) => a + b, 0) / v.length; };
+        const x = avg("idle-tx") / avg("baseline");
+        return bucket("How much bigger did the quotes table get with the idle transaction, compared with the baseline?", x,
+          [{ lt: 3, label: "Under 3 times" }, { lt: 20, label: "3 to 20 times" }, { lt: 150, label: "20 to 150 times" }, { lt: Infinity, label: "Over 150 times" }],
+          `quotes peaked at ${ctx.range("baseline", "max_table_bytes", fmtMB)} in the baseline and ${ctx.range("idle-tx", "max_table_bytes", fmtMB)} with the idle session (${x.toFixed(0)}× on average), in under three minutes, on a 2,000-row table.`);
+      },
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay idle-tx-timeout", match: { run: ["idle-tx-timeout"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report xmin", match: { report: true } },
+  ],
+
+  overflow: [
+    { id: "outage", type: "command", xp: 50, text: "Run it: replay int4", match: { run: ["int4"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch int4 ids left reach zero, and orders start failing", observe: { round: "int4", when: "failure", offset: 2 }, hint: "Replay int4 and watch the int4 ids left tile count down." },
+    {
+      id: "which", type: "quiz", xp: 100, badge: "early-warning",
+      async build({ ctx, load }) {
+        const r = await load("int4");
+        const zero = r.frames.find((f) => f.db?.int4_ids_left != null && f.db.int4_ids_left <= 0)?.t;
+        const fail = r.headline.first_failure_s;
+        const keys = ["pool_acquired", "longest_xact_s", "int4_ids_left", "pg_lock_wait"];
+        const label = { pool_acquired: "App pool connections in use", longest_xact_s: "Oldest open transaction", int4_ids_left: "int4 ids left", pg_lock_wait: "Sessions waiting on a lock" };
+        const start = r.frames.find((f) => f.db?.int4_ids_left != null)?.db.int4_ids_left;
+        return {
+          q: "Which signal told you exactly when orders would start failing?",
+          options: keys.map((k) => label[k]), answer: keys.indexOf("int4_ids_left"),
+          explain: `In the replayed run int4 ids left started at ${ctx.fmt.n(start)} and reached zero at second ${zero}; the first failed order was at second ${fail}. Nothing else moved: no lock, no pool pressure, until the inserts failed.`,
+        };
+      },
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay bigint", match: { run: ["bigint"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare both rounds: lab report overflow", match: { report: true } },
+  ],
+
+  hotrow: [
+    { id: "baseline", type: "command", xp: 50, text: "Run the baseline: orders spread across accounts", match: { run: ["baseline"] } },
+    { id: "outage", type: "command", xp: 50, text: "Send every order to one row: replay hot", match: { run: ["hot"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch ten or more sessions queue on the one row", observe: { round: "hot", when: "metric", metric: "pg_lock_wait", gte: 10 }, hint: "Replay hot and watch the Lock waiters tile." },
+    {
+      id: "runs", type: "quiz", xp: 100,
+      async build({ ctx }) {
+        const hs = ctx.list("hot");
+        const ok = hs.filter((h) => h.failed_pct === 0).length, bad = hs.length - ok;
+        const opts = ["Every run absorbed it: no failures", "Every run collapsed", "The runs disagreed: some absorbed it, some collapsed"];
+        return {
+          q: `The hot round was recorded ${hs.length} times. What happened?`, options: opts,
+          answer: bad === 0 ? 0 : ok === 0 ? 1 : 2,
+          explain: `${ok} absorbed it and ${bad} collapsed (${ctx.range("hot", "failed_pct", ctx.fmt.pct)} failed across runs). With the same load and the same code, that is a system at a tipping point. One recording would have told either story.`,
+        };
+      },
+    },
+    { id: "fix", type: "command", xp: 100, text: "Ship the fix: replay hot-locklast", match: { run: ["hot-locklast"] } },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report hotrow", match: { report: true } },
+  ],
 };
+
+// Shared by the briefings of rounds recorded with pgx's cancel-request mode.
+const CANCEL_NOTE = `<div class="callout accent"><p><strong>Recorded with <code>CANCEL_MODE=cancel_request</code>.</strong> A request that runs out of time asks PostgreSQL to cancel its query instead of closing the connection (the pgx fix from the batch mission), so what you see is this failure on its own, without the reconnect loop.</p></div>`;
+
+function fmtMB(v) { return `${(v / 1048576).toFixed(1)} MB`; }
+
+/** A quiz whose answer is the bucket a measured ratio falls in. */
+function bucket(q, x, buckets, explain) {
+  const i = buckets.findIndex((b) => x < b.lt);
+  return { q, options: buckets.map((b) => b.label), answer: i < 0 ? buckets.length - 1 : i, explain };
+}

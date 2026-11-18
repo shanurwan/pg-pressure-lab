@@ -31,6 +31,16 @@ export const D = {
   },
 };
 
+// What each job in events.jsonl is called on screen. Unknown jobs fall back
+// to their event name, so a new job type needs no change here.
+const JOB_LABELS = { batch: "batch", migration: "migration", lock: "lock", idle_tx: "idle_tx job", churn: "churn job" };
+export function jobLabel(run) {
+  const j = run?.job || "job";
+  return JOB_LABELS[j] || j.replace(/_/g, " ");
+}
+/** "committed" for the batch transaction, "ended" for anything else. */
+export const jobEndVerb = (run) => (run?.job === "batch" ? "committed" : "ended");
+
 export function prep(run) {
   run.byT = new Map(run.frames.map((f) => [f.t, f]));
   run.maxT = run.frames.length ? run.frames[run.frames.length - 1].t : 0;
@@ -103,6 +113,8 @@ export function makeCtx(sc, sig) {
   const ctx = {
     rate, fmt, sig,
     count: (round, r) => pick(round, r).length,
+    /** headlines of every run of a round at the top rate, oldest first */
+    list: (round, r) => pick(round, r).map((x) => x.headline),
     has: (round) => pick(round).length > 0,
     range: (round, k, f = String, r) => rangeOf(pick(round, r).map((x) => field(x.headline, k)), f),
     countWhere: (round, pred, r) => pick(round, r).filter((x) => pred(x.headline)).length,

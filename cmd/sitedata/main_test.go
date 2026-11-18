@@ -142,3 +142,52 @@ func TestStamp(t *testing.T) {
 		t.Fatal("stamping twice without changes must be stable")
 	}
 }
+
+// The meta trigger picks the window when a background job (xmin's churn)
+// starts first; attempts.csv, the appended sampler columns and the retry
+// summary reach the frames and the headline.
+func TestTriggerWindowAttemptsAndNewColumns(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "meta.json", `{"rate":300,"duration":"180s","trigger":"idle_tx"}`)
+	write(t, dir, "summary.json", `{"started_at":"2026-11-18T04:00:00Z","ops":{"order":{"n":4,"ok":3,"p99_ms":5}},
+		"retry":{"retries_sent":7,"retries_denied_by_budget":2}}`)
+	write(t, dir, "load.csv", "sec,op,n,ok,errors,p50_ms,p99_ms,max_ms,error_codes\n"+
+		"0,order,1,1,0,1.0,1.0,1.0,\n1,order,1,1,0,1.0,1.0,1.0,\n2,order,1,0,1,0.0,0.0,0.0,deadline:1\n3,order,1,1,0,1.0,1.0,1.0,\n")
+	write(t, dir, "events.jsonl", `{"wall":"2026-11-18T04:00:00Z","event":"churn_start"}`+"\n"+
+		`{"wall":"2026-11-18T04:00:01Z","event":"idle_tx_start"}`+"\n"+
+		`{"wall":"2026-11-18T04:00:02Z","event":"idle_tx_end"}`+"\n"+
+		`{"wall":"2026-11-18T04:00:03Z","event":"churn_end"}`+"\n")
+	write(t, dir, "attempts.csv", "sec,original,retries,retries_denied\n0,1,0,0\n2,1,5,2\n")
+	write(t, dir, "sampler.csv", "t,pg_active,pg_idle_in_tx,pg_lock_wait,pg_total,longest_xact_s,bouncer_cl_waiting,"+
+		"bouncer_maxwait_ms,pool_acquired,pool_empty_acquires,pg_sessions_started,pg_sessions_abandoned,"+
+		"quotes_dead_tup,quotes_bytes,oldest_xmin_age,int4_ids_left\n"+
+		"2026-11-18T04:00:01.100Z,1,1,0,5,1.0,0,0,1,0,0,0,100,8192,50,10\n"+
+		"2026-11-18T04:00:02.100Z,1,1,0,5,2.0,0,0,1,0,0,0,900,16384,70,-3\n")
+	r, err := loadRun(dir, "xmin", "idle-tx", "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Job != "idle_tx" || r.BatchWindow == nil || r.BatchWindow.StartS != 1 || r.BatchWindow.EndS != 2 {
+		t.Fatalf("trigger window wrong: job %q window %+v", r.Job, r.BatchWindow)
+	}
+	if got := r.Frames[0].Events; len(got) != 1 || got[0] != "churn_start" {
+		t.Errorf("background job events must still be marked: %v", got)
+	}
+	if rf := r.Frames[2].Retry; rf == nil || rf.Retries != 5 || rf.Denied != 2 {
+		t.Errorf("attempts not joined: %+v", rf)
+	}
+	if r.Frames[1].Retry != nil {
+		t.Errorf("a second missing from attempts.csv must have no retry frame")
+	}
+	db := r.Frames[2].DB
+	if db == nil || *db.QuotesDeadTup != 900 || *db.Int4IdsLeft != -3 {
+		t.Fatalf("new sampler columns not read: %+v", db)
+	}
+	h := r.Headline
+	if *h.MaxDeadTup != 900 || *h.MaxTableBytes != 16384 || *h.MaxXminAge != 70 || *h.MinInt4IdsLeft != -3 {
+		t.Errorf("headline maxima wrong: %+v", h)
+	}
+	if h.FirstFailureS == nil || *h.FirstFailureS != 2 || *h.RetriesSent != 7 || *h.RetriesDenied != 2 {
+		t.Errorf("first failure / retries wrong: %+v", h)
+	}
+}

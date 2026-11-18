@@ -1,7 +1,7 @@
 // The terminal. Commands replay recorded runs: `lab run` drives the shared
 // player and prints status lines as the replay passes through time. Every
 // line is derived from the recorded run files; nothing here touches a database.
-import { D, totals, fmt } from "./data.js";
+import { D, totals, fmt, jobLabel, jobEndVerb } from "./data.js";
 import { SCENARIOS } from "./manifest.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -33,6 +33,7 @@ export function createTerminal(root, api) {
     line([
       `<span class="acc">commands</span>  <span class="c">· Tab completes · ↑ ↓ history · / focuses</span>`,
       row("lab run <mission> <round>", "replay a recorded run"),
+      row("  [--stamp S]", "one particular run (lab runs)"),
       row("lab rounds [mission]", "what each round changes"),
       row("lab runs [mission]", "recorded runs, headline numbers"),
       row("lab report [mission]", "compare every round"),
@@ -60,6 +61,12 @@ export function createTerminal(root, api) {
     let rs = runsOf(sc, round, rate);
     if (!rs.length) rs = runsOf(sc, round);
     if (!rs.length) { line(`no recorded run for ${esc(sc)} ${esc(round)}. try: lab rounds ${esc(sc)}`, "bad"); return; }
+    // --stamp picks one recorded run of the round (see lab runs)
+    const si = argv.indexOf("--stamp");
+    if (si >= 0) {
+      rs = rs.filter((r) => r.stamp === argv[si + 1]);
+      if (!rs.length) { line(`no run ${esc(argv[si + 1] || "")} for ${esc(sc)} ${esc(round)}. try: lab runs ${esc(sc)}`, "bad"); return; }
+    }
     const top = Math.max(...rs.map((r) => r.rate));
     const pool = rate ? rs : rs.filter((r) => r.rate === top);
     const pick = pool.filter((r) => r.headline.max_sessions_per_s !== null).at(-1) || pool.at(-1);
@@ -92,8 +99,10 @@ export function createTerminal(root, api) {
       follow.next += 10;
     }
     const w = r.batch_window;
-    if (w && t >= w.start_s && !follow.events.has("s")) { follow.events.add("s"); line(`<span class="job">▶ ${esc(r.job || "job")} started at ${w.start_s.toFixed(1)} s</span>`); }
-    if (w && t >= w.end_s && !follow.events.has("e")) { follow.events.add("e"); line(`<span class="job">■ ${esc(r.job || "job")} committed at ${w.end_s.toFixed(1)} s, after ${(w.end_s - w.start_s).toFixed(0)} s</span>`); }
+    if (w && t >= w.start_s && !follow.events.has("s")) { follow.events.add("s"); line(`<span class="job">▶ ${esc(jobLabel(r))} started at ${w.start_s.toFixed(1)} s</span>`); }
+    if (w && t >= w.end_s && !follow.events.has("e")) { follow.events.add("e"); line(`<span class="job">■ ${esc(jobLabel(r))} ${jobEndVerb(r)} at ${w.end_s.toFixed(1)} s, after ${(w.end_s - w.start_s).toFixed(0)} s</span>`); }
+    // runs without a job window: mark the first failed second instead
+    if (!w && r.headline?.first_failure_s != null && t >= r.headline.first_failure_s && !follow.events.has("f")) { follow.events.add("f"); line(`<span class="bad">✕ first failed request at ${r.headline.first_failure_s} s</span>`); }
     if (t >= r.maxT && !follow.done) {
       follow.done = true;
       for (const [op, s] of Object.entries(r.summary?.ops || {}).sort()) {
@@ -102,7 +111,11 @@ export function createTerminal(root, api) {
       }
       const h = r.headline;
       const tone = h.failed_pct > 1 ? "bad" : "ok";
-      line(`<span class="${tone}">failed ${fmt.n(h.failed)} of ${fmt.n(h.requests)} (${fmt.pct2(h.failed_pct)})</span>${h.failed_after_batch != null ? ` · <span class="${h.failed_after_batch ? "bad" : "ok"}">${fmt.n(h.failed_after_batch)} after the job ended · ${h.recovered_s === null ? "not recovered within the run" : `recovered ${h.recovered_s} s after`}</span>` : ""}`);
+      if (h.retries_sent != null) line(`  retries  sent=${fmt.n(h.retries_sent)}  refused by budget=${fmt.n(h.retries_denied ?? 0)}`);
+      // "recovered" only means something if requests failed; a null with no
+      // failures just means the run ended less than 10 s after the job
+      const rec = !h.failed ? "" : h.recovered_s === null ? " · not recovered within the run" : ` · recovered ${h.recovered_s} s after`;
+      line(`<span class="${tone}">failed ${fmt.n(h.failed)} of ${fmt.n(h.requests)} (${fmt.pct2(h.failed_pct)})</span>${h.failed_after_batch != null ? ` · <span class="${h.failed_after_batch ? "bad" : "ok"}">${fmt.n(h.failed_after_batch)} after the ${esc(jobLabel(r))} ${jobEndVerb(r)}${rec}</span>` : ""}`);
       api.onEvent({ type: "runEnd", scenario: r.scenario, round: r.round, run: r });
     }
   });
@@ -117,7 +130,7 @@ export function createTerminal(root, api) {
       const rs = runsOf(sc, rd, top);
       if (!rs.length) continue;
       const f = rs.map((r) => r.headline.failed_pct), a = rs.map((r) => r.headline.failed_after_batch).filter((v) => v != null);
-      const rec = [...new Set(rs.map((r) => (r.headline.batch_seconds == null ? "–" : r.headline.recovered_s === null ? "never" : `${r.headline.recovered_s}s`)))];
+      const rec = [...new Set(rs.map((r) => (r.headline.batch_seconds == null || !r.headline.failed ? "–" : r.headline.recovered_s === null ? "never" : `${r.headline.recovered_s}s`)))];
       const rg = (v, fm) => (v.length ? (Math.min(...v) === Math.max(...v) ? fm(v[0]) : `${fm(Math.min(...v))}–${fm(Math.max(...v))}`) : "–");
       line(`${esc(rd).padEnd(20)}${String(rs.length).padEnd(6)}<span class="${Math.max(...f) > 1 ? "bad" : "ok"}">${rg(f, (v) => v.toFixed(2) + "%").padEnd(16)}</span>${rg(a, (v) => fmt.n(v)).padEnd(16)}${rec.join(", ")}`);
     }

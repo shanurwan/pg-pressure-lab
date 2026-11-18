@@ -2,7 +2,7 @@
 // runs from site/data. Served by `scripts/lab live`, it follows the run in
 // progress over /live/events instead.
 import { SCENARIOS, SOURCES, SIGNALS } from "./manifest.js";
-import { D, fmt, prep, totals, firstSignals, makeCtx, store } from "./data.js";
+import { D, fmt, prep, totals, firstSignals, makeCtx, store, jobLabel, jobEndVerb } from "./data.js";
 import { createScene } from "./scene.js";
 import { drawStrip } from "./chart.js";
 import { createTerminal } from "./terminal.js";
@@ -75,15 +75,31 @@ function runLabel() {
 // ---------------- metrics ----------------
 const KPIS = [
   { id: "ok", label: "Success", get: (f) => { const t = totals(f); return t.n ? (t.ok / t.n) * 100 : null; }, show: (v) => `${v.toFixed(1)}%`, tone: (v) => (v < 90 ? "bad" : v < 99 ? "warn" : "ok") },
-  { id: "p99", label: "p99 latency", get: (f) => { const v = Math.max(0, ...Object.values(f?.ops || {}).map((o) => o.p99 || 0)); return f ? v : null; }, show: fmt.ms, tone: (v) => (v > 1500 ? "bad" : v > 500 ? "warn" : "ok") },
+  // no successful request that second: there is no latency to show, not "0 ms"
+  { id: "p99", label: "p99 latency", get: (f) => { if (!f || !totals(f).ok) return null; return Math.max(0, ...Object.values(f.ops || {}).filter((o) => o.ok > 0).map((o) => o.p99 || 0)); }, show: fmt.ms, tone: (v) => (v > 1500 ? "bad" : v > 500 ? "warn" : "ok") },
   { id: "pool", label: "pgx pool in use", get: (f) => f?.db?.pool_acquired, show: (v) => `${v}/40`, tone: (v) => (v >= 40 ? "bad" : v >= 30 ? "warn" : "ok"), flag: (v) => (v >= 40 ? "FULL" : "") },
   { id: "queue", label: "PgBouncer queue", get: (f) => f?.db?.bouncer_cl_waiting, show: fmt.n, tone: (v) => (v >= 20 ? "bad" : v > 0 ? "warn" : "ok") },
   { id: "locks", label: "Lock waiters", get: (f) => f?.db?.pg_lock_wait, show: fmt.n, tone: (v) => (v >= 10 ? "bad" : v > 0 ? "warn" : "ok") },
   { id: "xact", label: "Oldest transaction", get: (f) => f?.db?.longest_xact_s, show: (v) => `${Math.round(v)} s`, tone: (v) => (v > 30 ? "bad" : v > 5 ? "warn" : "ok") },
   { id: "sess", label: "New sessions/s", get: (f) => f?.db?.pg_sessions_started, show: fmt.n, tone: (v) => (v > 50 ? "bad" : v > 10 ? "warn" : "ok") },
   { id: "failed", label: "Failed so far", get: null, show: fmt.n, tone: (v) => (v > 0 ? "bad" : "ok") },
+  // scenario tiles: a mission lists the ones it needs in `tiles`
+  { id: "dead", label: "Dead tuples (quotes)", get: (f) => f?.db?.quotes_dead_tup, show: fmt.n, tone: (v) => (v > 50000 ? "bad" : v > 10000 ? "warn" : "ok") },
+  { id: "tblmb", label: "quotes size", get: (f) => f?.db?.quotes_bytes, show: (v) => `${(v / 1048576).toFixed(1)} MB`, tone: (v) => (v > 4 * 1048576 ? "bad" : v > 1048576 ? "warn" : "ok") },
+  { id: "xminage", label: "Oldest xmin age", get: (f) => f?.db?.oldest_xmin_age, show: fmt.n, tone: (v) => (v > 50000 ? "bad" : v > 5000 ? "warn" : "ok") },
+  { id: "int4", label: "int4 ids left", get: (f) => (f?.db?.int4_ids_left == null ? null : Math.max(0, f.db.int4_ids_left)), show: fmt.n, tone: (v) => (v <= 0 ? "bad" : v < 1500 ? "warn" : "ok"), flag: (v) => (v <= 0 ? "OUT" : "") },
+  { id: "retries", label: "Retries/s", get: (f) => f?.retry?.retries, show: fmt.n, tone: (v) => (v > 100 ? "bad" : v > 0 ? "warn" : "ok") },
+  { id: "refused", label: "Retries refused/s", get: (f) => f?.retry?.denied, show: fmt.n, tone: () => "ok" },
 ];
-$("#kpis").innerHTML = KPIS.map((k) => `<div class="kpi ok" data-k="${k.id}"><div class="l"><span>${k.label}</span><span class="flag" hidden></span></div><div class="v">–</div><div class="spark"><canvas aria-hidden="true"></canvas></div></div>`).join("");
+const DEFAULT_TILES = ["ok", "p99", "pool", "queue", "locks", "xact", "sess", "failed"];
+let tiles = [];
+function setTiles(ids) {
+  const want = (ids || DEFAULT_TILES).map((id) => KPIS.find((k) => k.id === id)).filter(Boolean);
+  if (want.map((k) => k.id).join() === tiles.map((k) => k.id).join()) return;
+  tiles = want;
+  $("#kpis").innerHTML = tiles.map((k) => `<div class="kpi ok" data-k="${k.id}"><div class="l"><span>${k.label}</span><span class="flag" hidden></span></div><div class="v">–</div><div class="spark"><canvas aria-hidden="true"></canvas></div></div>`).join("");
+}
+setTiles();
 
 function prepSeries(r) {
   if (r.series && r.series.n === r.frames.length) return;
@@ -91,6 +107,11 @@ function prepSeries(r) {
   for (const k of KPIS) if (k.get) s[k.id] = new Map(r.frames.map((f) => [f.t, k.get(f)]));
   let cum = 0; s.failed = new Map();
   for (const f of r.frames) { const t = totals(f); cum += t.n - t.ok; s.failed.set(f.t, cum); }
+  // a round whose clients never retry has no attempts.csv; its summary says 0
+  if (r.headline?.retries_sent === 0 && !r.frames.some((f) => f.retry)) {
+    s.retries = new Map(r.frames.map((f) => [f.t, 0]));
+    s.refused = new Map(r.frames.map((f) => [f.t, 0]));
+  }
   r.series = s;
 }
 
@@ -132,7 +153,7 @@ function paintMetrics(t) {
   const r = player.run;
   const f = r?.byT.get(t);
   const toneColor = { ok: css("--accent-2"), warn: css("--warn"), bad: css("--bad") };
-  for (const k of KPIS) {
+  for (const k of tiles) {
     const el = $(`.kpi[data-k="${k.id}"]`);
     const map = r?.series?.[k.id];
     const v = map ? map.get(t) : null;
@@ -147,8 +168,9 @@ function paintMetrics(t) {
   $("#scrub").value = String(t);
   // time and job state live in the panel header, so nothing sits on the 3D labels
   const w = r?.batch_window;
-  const job = r?.job || "job";
-  const state = !r ? "" : !w ? "no job" : t < w.start_s ? `${job} at ${Math.round(w.start_s)} s` : t < w.end_s ? `<span class="jb">${job} running ${Math.round(t - w.start_s)} s</span>` : `${job} done at ${Math.round(w.end_s)} s`;
+  const job = esc(jobLabel(r));
+  const ff = r?.headline?.first_failure_s;
+  const state = !r ? "" : !w ? (ff != null && t >= ff ? `<span class="jb">failing since ${ff} s</span>` : "no job") : t < w.start_s ? `${job} at ${Math.round(w.start_s)} s` : t < w.end_s ? `<span class="jb">${job} running ${Math.round(t - w.start_s)} s</span>` : `${job} ${jobEndVerb(r)} at ${Math.round(w.end_s)} s`;
   $("#clock").innerHTML = r ? `${state} · <b>${t}</b>/${r.maxT} s` : "0 s";
 }
 new ResizeObserver(() => { if (player.run) paintMetrics(Math.floor(player.t)); }).observe($("#metrics-panel"));
@@ -240,6 +262,12 @@ async function quizFor(sc, o, ctx) {
         explain: fixes.map((r) => `${r}: ${ctx.range(r, "failed_pct", fmt.pct) ?? "–"} failed`).join(" · ") + ".",
       };
     }
+  } else if (o.build) {
+    // the question, its options and its answer come from the recorded runs
+    try {
+      q = await o.build({ ctx, fmt, load: (round) => D.load(bestRun(sc, round)) });
+      if (q && !(q.answer >= 0 && q.answer < q.options.length)) q = null;
+    } catch (e) { console.warn(`quiz ${sc.id}:${o.id} unavailable:`, e); q = null; }
   } else if (o.q) {
     q = { q: o.q, options: o.options, answer: o.answer, explain: o.explain ? o.explain(ctx) : "" };
   }
@@ -255,6 +283,7 @@ async function openMission(id, { quiet = false, keepRun = false } = {}) {
   const sc = missionById(id);
   if (!sc) { term?.line(`no mission called ${esc(id)}. type missions`, "bad"); return; }
   mission = sc;
+  setTiles(sc.tiles);
   ctx = makeCtx(sc, await signalsFor(sc));
   quizzes = {};
   for (const o of G.objectivesOf(sc)) {
@@ -270,7 +299,9 @@ async function openMission(id, { quiet = false, keepRun = false } = {}) {
   history.replaceState(null, "", `?${p}`);
   renderSidebar(); renderObjectives(); renderXP();
   if (!keepRun && player.run?.id !== "live") {
-    const first = G.roundsOf(sc).includes("baseline") ? "baseline" : primaryRound(sc);
+    // load the round the first objective asks for, so the screen matches the task
+    const firstObj = G.objectivesOf(sc).find((o) => o.match?.run?.length);
+    const first = firstObj?.match.run[0] || (G.roundsOf(sc).includes("baseline") ? "baseline" : primaryRound(sc));
     const id0 = bestRun(sc, first);
     if (id0) await player.loadRun(id0, 0);
   }
@@ -442,7 +473,7 @@ function onEvent(ev) {
   if (ev.type === "runEnd") {
     $("#term-sub").textContent = "replay mode";
     const h = ev.run.headline;
-    if (sc && (sc.fixes || []).includes(ev.round) && h.failed === 0 && h.batch_seconds != null) badge("zero");
+    if (sc && (sc.fixes || []).includes(ev.round) && h.failed === 0) badge("zero");
   }
   if (ev.type === "report") G.state.used.report = true;
   if (ev.type === "top") G.state.used.top = true;
@@ -456,20 +487,39 @@ function onEvent(ev) {
   if (sc.id === mission?.id) afterProgress();
 }
 
+/**
+ * Has the replay reached the moment an observe objective asks for?
+ * when: "jobEnd" (default) | "jobStart" | "failure" | "metric"; offset in
+ * seconds after that moment; needFailures: some request failed after it.
+ */
+function observed(ob, t, r) {
+  const w = r.batch_window, when = ob.when || "jobEnd";
+  const off = ob.offset ?? ob.afterJobEnd ?? 0;
+  let at;
+  if (when === "jobEnd") at = w?.end_s;
+  else if (when === "jobStart") at = w?.start_s;
+  else if (when === "failure") at = r.headline?.first_failure_s;
+  else if (when === "metric") {
+    // the first second the sampler column reached the threshold
+    at = r.frames.find((f) => (f.db?.[ob.metric] ?? -Infinity) >= ob.gte)?.t;
+  }
+  if (at == null || t < at + off) return false;
+  if (ob.needFailures) {
+    let bad = 0;
+    for (let k = Math.ceil(at); k <= t; k++) { const tt = totals(r.byT.get(k)); bad += tt.n - tt.ok; }
+    if (!bad) return false;
+  }
+  return true;
+}
+
 function checkObserve(t, r) {
   const sc = mission;
   if (!sc || r.scenario !== sc.id) return;
   for (const o of G.objectivesOf(sc)) {
     if (o.type !== "observe" || G.isDone(sc, o) || r.round !== o.observe.round) continue;
-    const w = r.batch_window;
-    if (!w || t < w.end_s + (o.observe.afterJobEnd || 0)) continue;
-    if (o.observe.needFailures) {
-      let bad = 0;
-      for (let k = Math.ceil(w.end_s); k <= t; k++) { const tt = totals(r.byT.get(k)); bad += tt.n - tt.ok; }
-      if (!bad) continue;
-    }
+    if (!observed(o.observe, t, r)) continue;
     const xp = G.complete(sc, o);
-    gained(xp, "You saw it", `+${xp} XP · the job ended, the errors didn't`);
+    gained(xp, "You saw it", `+${xp} XP · ${o.text}`);
     term.line(`<span class="xp-line">✓ objective · ${esc(o.text)} · +${xp} XP</span>`);
     afterProgress();
   }
@@ -483,7 +533,7 @@ function hint() {
     const cmd = o.match.run ? `lab run ${sc.id} ${o.match.run[0]}` : `lab report ${sc.id}`;
     return { text: `${esc(o.text)}. Press Enter to run it.`, cmd };
   }
-  if (o.type === "observe") return { text: `Replay the ${esc(o.observe.round)} round and let it play past the end of the job. Watch the Success tile.`, cmd: `lab run ${sc.id} ${o.observe.round}` };
+  if (o.type === "observe") return { text: esc(o.hint || `Replay the ${o.observe.round} round and let it play past the end of the job. Watch the Success tile.`), cmd: `lab run ${sc.id} ${o.observe.round}` };
   return { text: "Answer the question in the Objectives panel. Stuck? The guide explains it.", cmd: "lab explain diagnose" };
 }
 $("#hint-btn").addEventListener("click", () => term.exec("hint"));
@@ -506,7 +556,7 @@ const strip = (html) => html.replace(/<\/?div[^>]*>/g, "").replace(/\s+\n/g, "\n
 function explain(step) {
   const sc = mission;
   const o = G.nextObjective(sc);
-  const auto = !o ? "alert" : ["baseline", "outage"].includes(o.id) ? "reproduce" : o.type === "quiz" && o.quiz === "bestFix" ? "fix" : ["fix", "best"].includes(o.id) ? "fix" : o.id === "report" ? "alert" : "diagnose";
+  const auto = !o ? "alert" : ["baseline", "outage"].includes(o.id) ? "reproduce" : o.type === "quiz" && o.quiz === "bestFix" ? "fix" : (o.id.startsWith("fix") || o.id === "best") ? "fix" : o.id === "report" ? "alert" : "diagnose";
   const s = ["incident", "reproduce", "diagnose", "fix", "alert"].includes(step) ? step : auto;
   const html = sc[s] ? sc[s](ctx) : "";
   return `<p><span class="acc">${s}</span></p>${strip(html) || "<p>No guide text for this step yet.</p>"}`;
@@ -541,7 +591,8 @@ function openDrawer(kind) {
       body.innerHTML = `<div class="locked"><p><strong>Locked.</strong> Finish the objectives to unlock the debrief (${p.n}/${p.total} done).</p><p style="margin:0">Next: ${hint().text}</p></div>`;
     } else {
       const st = G.starsOf(sc);
-      const why = [st < 2 ? "answer every question right first time" : "", st < 3 ? "replay every round" : ""].filter(Boolean).join(" and ");
+      const gap = G.starGaps(sc);
+      const why = [gap.quizzes ? "answer every question right first time" : "", gap.rounds.length ? `replay ${gap.rounds.map((r) => `<code>${esc(r)}</code>`).join(", ")}` : ""].filter(Boolean).join(" and ");
       body.innerHTML = `<div class="done-hero"><span class="big">${starsHtml(st)}</span><div><strong>Mission complete.</strong><br><span class="faint">${st === 3 ? "All three stars." : `For more stars: ${why}.`}</span></div></div>
         <h3>Why it happened</h3>${sc.diagnose(ctx)}
         <h3>The fixes</h3>${sc.fix(ctx)}${roundsTable(sc)}
@@ -609,7 +660,10 @@ function roundsTable(sc) {
   const rec = (round) => {
     const xs = rs.filter((r) => r.round === round);
     if (xs.every((r) => r.headline.batch_seconds == null)) return "–";
-    const ok = xs.map((r) => r.headline.recovered_s).filter((v) => v !== null), never = xs.length - ok.length;
+    // only runs that failed have something to recover from
+    const hurt = xs.filter((r) => r.headline.failed > 0);
+    if (!hurt.length) return '<span class="v-ok">no failures</span>';
+    const ok = hurt.map((r) => r.headline.recovered_s).filter((v) => v !== null), never = hurt.length - ok.length;
     if (!ok.length) return '<span class="v-bad">not within the run</span>';
     const lo = Math.min(...ok), hi = Math.max(...ok);
     return `${lo === hi ? fmt.s(lo) : `${lo}–${hi} s`}${never ? ` <span class="v-bad">(${never} never)</span>` : ""}`;
@@ -741,12 +795,19 @@ let term = null;
   if (!ms.length) { $("#obj-title").textContent = "No recorded runs yet"; return; }
   const p = params();
   const want = p.get("mission") || p.get("scenario");
-  const runId = p.get("run"), at = Number(p.get("at") || 0);
-  const first = (want && missionById(want)) || ms.find((s) => !G.progress(s).done) || ms[0];
+  const at = Number(p.get("at") || 0);
+  const runScenario = D.index.find((r) => r.id === p.get("run"))?.scenario;
+  const first = (want && missionById(want)) || (runScenario && missionById(runScenario)) || ms.find((s) => !G.progress(s).done) || ms[0];
+  // run= may be a run id, or a round name of the mission (?mission=batch&run=naive);
+  // anything else falls back to the mission's default run instead of empty tiles
+  const rawRun = p.get("run");
+  const runId = !rawRun ? null : D.index.some((r) => r.id === rawRun) ? rawRun : bestRun(first, rawRun);
   await openMission(first.id, { quiet: true, keepRun: !!runId });
-  if (runId && D.index.some((r) => r.id === runId)) {
+  if (runId) {
     await player.loadRun(runId, at);
     const ps = params(); ps.set("run", runId); if (at) ps.set("at", String(at)); history.replaceState(null, "", `?${ps}`);
+  } else if (rawRun) {
+    const ps = params(); ps.delete("run"); ps.delete("at"); history.replaceState(null, "", `?${ps}`);
   }
   if (LIVE) startLive();
   term.line(`<span class="acc">mission</span> ${esc(first.short)} <span class="c">· ${G.progress(first).n}/${G.progress(first).total} objectives done · the suggestions below run the next step</span>`);

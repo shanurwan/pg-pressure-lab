@@ -54,6 +54,19 @@ type dbFrame struct {
 	PoolEmptyAcquires   int64   `json:"pool_empty_acquires"`
 	PgSessionsStarted   *int64  `json:"pg_sessions_started"`
 	PgSessionsAbandoned *int64  `json:"pg_sessions_abandoned"`
+	// Appended sampler columns; absent from runs recorded before they existed.
+	QuotesDeadTup *int64 `json:"quotes_dead_tup,omitempty"`
+	QuotesBytes   *int64 `json:"quotes_bytes,omitempty"`
+	OldestXminAge *int64 `json:"oldest_xmin_age,omitempty"`
+	Int4IdsLeft   *int64 `json:"int4_ids_left,omitempty"`
+}
+
+// retryFrame is one second of attempts.csv (retry rounds only): requests the
+// clients meant to send, retries they sent, and retries the budget refused.
+type retryFrame struct {
+	Original int `json:"original"`
+	Retries  int `json:"retries"`
+	Denied   int `json:"denied"`
 }
 
 type frame struct {
@@ -61,6 +74,7 @@ type frame struct {
 	Ops    map[string]opFrame `json:"ops"`
 	DB     *dbFrame           `json:"db"`
 	Events []string           `json:"events"`
+	Retry  *retryFrame        `json:"retry,omitempty"`
 }
 
 type window struct {
@@ -94,6 +108,13 @@ type headline struct {
 	MaxBouncerQueue  int64          `json:"max_bouncer_queue"`
 	MaxLongestXactS  float64        `json:"max_longest_xact_s"`
 	MaxSessionsPerS  *int64         `json:"max_sessions_per_s"`
+	FirstFailureS    *int           `json:"first_failure_s"` // first second with a failed request
+	MaxDeadTup       *int64         `json:"max_dead_tup,omitempty"`
+	MaxTableBytes    *int64         `json:"max_table_bytes,omitempty"`
+	MaxXminAge       *int64         `json:"max_xmin_age,omitempty"`
+	MinInt4IdsLeft   *int64         `json:"min_int4_ids_left,omitempty"`
+	RetriesSent      *int           `json:"retries_sent,omitempty"`
+	RetriesDenied    *int           `json:"retries_denied,omitempty"`
 }
 
 type run struct {
@@ -177,6 +198,21 @@ func main() {
 			}
 		}
 	}
+	// A run file whose results are gone (a round that was re-recorded) would
+	// otherwise linger in site/data forever; remove what this pass didn't write.
+	written := map[string]bool{}
+	for _, e := range index {
+		written[e.ID+".json"] = true
+	}
+	old, _ := filepath.Glob(filepath.Join(*out, "runs", "*.json"))
+	for _, f := range old {
+		if !written[filepath.Base(f)] {
+			if err := os.Remove(f); err != nil {
+				log.Fatal(err)
+			}
+			log.Printf("removed stale %s", f)
+		}
+	}
 	slices.SortFunc(index, func(a, b indexEntry) int { return strings.Compare(a.Stamp, b.Stamp) })
 	b, _ := json.MarshalIndent(map[string]any{"generated_utc": time.Now().UTC().Format(time.RFC3339), "runs": index}, "", " ")
 	if err := os.WriteFile(filepath.Join(*out, "index.json"), b, 0o644); err != nil {
@@ -254,6 +290,13 @@ func loadRun(dir, scenario, round, stamp string) (*run, error) {
 	if err := joinSampler(filepath.Join(dir, "sampler.csv"), loadStart, frames); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	if err := joinAttempts(filepath.Join(dir, "attempts.csv"), frames); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	var meta struct {
+		Trigger string `json:"trigger"`
+	}
+	_ = json.Unmarshal(r.Meta, &meta)
 
 	r.Batch = json.RawMessage("null")
 	if b, err := os.ReadFile(filepath.Join(dir, "batch.json")); err == nil {
@@ -276,17 +319,25 @@ func loadRun(dir, scenario, round, stamp string) (*run, error) {
 	// Other jobs (migrations, triggers, idle transactions...) are marked in
 	// events.jsonl by scripts/lab as <name>_start / <name>_end. The first
 	// start and the last end give the job window when there is no batch.json.
+	// When meta.json names the trigger job and it has events, the window is
+	// that job's own; background jobs (xmin's churn) are still marked.
+	events := readEvents(filepath.Join(dir, "events.jsonl"), loadStart)
+	hasTrigger := meta.Trigger != "" && slices.ContainsFunc(events, func(e event) bool { return e.name == meta.Trigger+"_start" })
 	var jobStart, jobEnd *float64
-	for _, e := range readEvents(filepath.Join(dir, "events.jsonl"), loadStart) {
+	for _, e := range events {
 		if r.BatchWindow != nil && (e.name == "batch_start" || e.name == "batch_end") {
 			continue
 		}
 		addEvent(frames, int(e.t), e.name)
+		name := strings.TrimSuffix(strings.TrimSuffix(e.name, "_start"), "_end")
+		if hasTrigger && name != meta.Trigger {
+			continue
+		}
 		v := e.t
 		switch {
 		case strings.HasSuffix(e.name, "_start") && jobStart == nil:
 			jobStart = &v
-			r.Job = strings.TrimSuffix(e.name, "_start")
+			r.Job = name
 		case strings.HasSuffix(e.name, "_end"):
 			jobEnd = &v
 		}
@@ -303,6 +354,15 @@ func loadRun(dir, scenario, round, stamp string) (*run, error) {
 	r.Frames = flatten(frames)
 	r.TopStatements = readStatements(filepath.Join(dir, "pg_stat_statements.tsv"))
 	r.Headline = computeHeadline(r.Frames, r.BatchWindow, r.Summary)
+	var rs struct {
+		Retry *struct {
+			Sent   int `json:"retries_sent"`
+			Denied int `json:"retries_denied_by_budget"`
+		} `json:"retry"`
+	}
+	if json.Unmarshal(r.Summary, &rs) == nil && rs.Retry != nil {
+		r.Headline.RetriesSent, r.Headline.RetriesDenied = &rs.Retry.Sent, &rs.Retry.Denied
+	}
 	return r, nil
 }
 
@@ -371,7 +431,35 @@ func joinSampler(path string, loadStart time.Time, frames map[int]*frame) error 
 			n := atoi64(v)
 			db.PgSessionsAbandoned = &n
 		}
+		opt := func(k string) *int64 {
+			v, ok := row[k]
+			if !ok || strings.TrimSpace(v) == "" {
+				return nil
+			}
+			n := atoi64(v)
+			return &n
+		}
+		db.QuotesDeadTup, db.QuotesBytes = opt("quotes_dead_tup"), opt("quotes_bytes")
+		db.OldestXminAge, db.Int4IdsLeft = opt("oldest_xmin_age"), opt("int4_ids_left")
 		get(frames, t).DB = db
+	}
+	return nil
+}
+
+// joinAttempts adds attempts.csv (retry rounds) to the frames, by second.
+func joinAttempts(path string, frames map[int]*frame) error {
+	rows, err := readCSV(path)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		t, err := strconv.Atoi(row["sec"])
+		if err != nil {
+			continue
+		}
+		if f, ok := frames[t]; ok {
+			f.Retry = &retryFrame{Original: atoi(row["original"]), Retries: atoi(row["retries"]), Denied: atoi(row["retries_denied"])}
+		}
 	}
 	return nil
 }
@@ -418,6 +506,10 @@ func computeHeadline(frames []frame, w *window, summary json.RawMessage) headlin
 		if s.n > 0 {
 			if s.ok < s.n {
 				h.SecondsFailing++
+				if h.FirstFailureS == nil {
+					t := f.T
+					h.FirstFailureS = &t
+				}
 			}
 			h.WorstSecondOK = math.Min(h.WorstSecondOK, float64(s.ok)/float64(s.n))
 		}
@@ -425,6 +517,13 @@ func computeHeadline(frames []frame, w *window, summary json.RawMessage) headlin
 			h.MaxLockWait = max(h.MaxLockWait, f.DB.PgLockWait)
 			h.MaxBouncerQueue = max(h.MaxBouncerQueue, f.DB.BouncerClWaiting)
 			h.MaxLongestXactS = math.Max(h.MaxLongestXactS, f.DB.LongestXactS)
+			maxPtr(&h.MaxDeadTup, f.DB.QuotesDeadTup)
+			maxPtr(&h.MaxTableBytes, f.DB.QuotesBytes)
+			maxPtr(&h.MaxXminAge, f.DB.OldestXminAge)
+			if v := f.DB.Int4IdsLeft; v != nil && (h.MinInt4IdsLeft == nil || *v < *h.MinInt4IdsLeft) {
+				n := *v
+				h.MinInt4IdsLeft = &n
+			}
 			if f.DB.PgSessionsStarted != nil {
 				if maxSess == nil {
 					v := int64(0)
@@ -509,6 +608,13 @@ func readStatements(path string) []statement {
 			MaxMs: atof(f[3]), Query: strings.TrimSpace(f[4])})
 	}
 	return out
+}
+
+func maxPtr(dst **int64, v *int64) {
+	if v != nil && (*dst == nil || *v > **dst) {
+		n := *v
+		*dst = &n
+	}
 }
 
 func get(m map[int]*frame, t int) *frame {

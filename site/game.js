@@ -82,16 +82,22 @@ export function progress(sc) {
   return { n, total: obs.length, done: obs.length > 0 && n === obs.length };
 }
 
-/** 1 star: every objective done. 2: every quiz right first time. 3: every round replayed. */
+/** What is still missing for the second and third stars. */
+export function starGaps(sc) {
+  const quizzes = objectivesOf(sc).filter((o) => o.type === "quiz");
+  const tried = new Set(state.tried[sc.id] || []);
+  return {
+    quizzes: !quizzes.every((o) => state.quiz[sc.id]?.[o.id]?.first),
+    rounds: roundsOf(sc).filter((r) => !tried.has(r)),
+  };
+}
+
+/** 1 star: every objective done. +1: every quiz right first time. +1: every round replayed. */
 export function starsOf(sc) {
   const p = progress(sc);
   if (!p.done) return 0;
-  let s = 1;
-  const quizzes = objectivesOf(sc).filter((o) => o.type === "quiz");
-  if (quizzes.every((o) => state.quiz[sc.id]?.[o.id]?.first)) s++;
-  const tried = new Set(state.tried[sc.id] || []);
-  if (roundsOf(sc).every((r) => tried.has(r))) s++;
-  return s;
+  const g = starGaps(sc);
+  return 1 + (g.quizzes ? 0 : 1) + (g.rounds.length ? 0 : 1);
 }
 
 export function nextObjective(sc) {
