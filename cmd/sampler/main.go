@@ -35,12 +35,23 @@ SELECT count(*) FILTER (WHERE state = 'active'),
 const sessionsSQL = `
 SELECT sessions, sessions_abandoned FROM pg_stat_database WHERE datname = current_database()`
 
+// healthSQL watches slow-burning trouble: dead row versions and size of the
+// hot quotes table, how far back the oldest snapshot holds the xmin horizon
+// (in transactions), and how many ids the orders sequence has left before it
+// passes the largest 32-bit integer.
+const healthSQL = `
+SELECT coalesce((SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = 'quotes'), 0),
+       coalesce(pg_total_relation_size(to_regclass('quotes')), 0),
+       coalesce((SELECT max(age(backend_xmin)) FROM pg_stat_activity WHERE backend_xmin IS NOT NULL), 0),
+       2147483647 - (SELECT last_value FROM orders_id_seq)`
+
 type row struct {
-	pgActive, pgIdleInTx, pgLockWait, pgTotal int64
-	longestXact                               float64
-	bouncerWaiting, bouncerMaxWaitMs          int64
-	poolAcquired, poolEmptyDelta              int64
-	sessionsDelta, abandonedDelta             int64
+	pgActive, pgIdleInTx, pgLockWait, pgTotal  int64
+	longestXact                                float64
+	bouncerWaiting, bouncerMaxWaitMs           int64
+	poolAcquired, poolEmptyDelta               int64
+	sessionsDelta, abandonedDelta              int64
+	quotesDead, quotesBytes, xminAge, int4Left int64
 }
 
 func main() {
@@ -80,7 +91,8 @@ func main() {
 	w := csv.NewWriter(f)
 	_ = w.Write([]string{"t", "pg_active", "pg_idle_in_tx", "pg_lock_wait", "pg_total", "longest_xact_s",
 		"bouncer_cl_waiting", "bouncer_maxwait_ms", "pool_acquired", "pool_empty_acquires",
-		"pg_sessions_started", "pg_sessions_abandoned"})
+		"pg_sessions_started", "pg_sessions_abandoned",
+		"quotes_dead_tup", "quotes_bytes", "oldest_xmin_age", "int4_ids_left"})
 
 	httpc := &http.Client{Timeout: 500 * time.Millisecond}
 	var lastEmpty, lastSessions, lastAbandoned int64 = -1, -1, -1
@@ -101,6 +113,9 @@ func main() {
 		} else if ctx.Err() == nil {
 			log.Printf("pg_stat_database: %v", err)
 		}
+		if err := pg.QueryRow(ctx, healthSQL).Scan(&r.quotesDead, &r.quotesBytes, &r.xminAge, &r.int4Left); err != nil && ctx.Err() == nil {
+			log.Printf("health: %v", err)
+		}
 		r.bouncerWaiting, r.bouncerMaxWaitMs = bouncerPools(ctx, bouncer)
 		if acq, empty, ok := apiPool(httpc, *apiURL); ok {
 			r.poolAcquired = acq
@@ -113,7 +128,8 @@ func main() {
 			i(r.pgActive), i(r.pgIdleInTx), i(r.pgLockWait), i(r.pgTotal),
 			strconv.FormatFloat(r.longestXact, 'f', 2, 64),
 			i(r.bouncerWaiting), i(r.bouncerMaxWaitMs), i(r.poolAcquired), i(r.poolEmptyDelta),
-			i(r.sessionsDelta), i(r.abandonedDelta)})
+			i(r.sessionsDelta), i(r.abandonedDelta),
+			i(r.quotesDead), i(r.quotesBytes), i(r.xminAge), i(r.int4Left)})
 		w.Flush()
 		select {
 		case <-ctx.Done():

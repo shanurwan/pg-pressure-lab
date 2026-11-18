@@ -35,12 +35,22 @@ func main() {
 		maxInflight = flag.Int("max-inflight", 4000, "requests in flight before new ones are dropped")
 		out         = flag.String("out", "", "directory for load.csv and summary.json (required)")
 		livePath    = flag.String("live", "", "also append one JSON line per second here, as requests finish (for scripts/lab live)")
+		retryMode   = flag.String("retry", "none", "client retry policy: none, immediate or backoff")
+		retries     = flag.Int("retries", 3, "retries per request (with -retry immediate or backoff)")
+		retryBase   = flag.Duration("retry-base", 100*time.Millisecond, "first backoff step (-retry backoff)")
+		retryCap    = flag.Duration("retry-cap", 2*time.Second, "longest backoff step (-retry backoff)")
+		retryBudget = flag.Float64("retry-budget", 0, "retries allowed per original request, e.g. 0.1; 0 means no budget")
+		hotPct      = flag.Float64("hot-pct", 0, "percent of orders placed on one account (id 1), like an omnibus account")
 	)
 	flag.Parse()
 	if *out == "" {
 		log.Fatal("-out is required")
 	}
 	mix, err := parseMix(*mixFlag)
+	if err != nil {
+		log.Fatal(err)
+	}
+	policy, err := parseRetry(*retryMode, *retries, *retryBase, *retryCap, *retryBudget)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -75,11 +85,26 @@ func main() {
 			continue
 		}
 		wg.Add(1)
+		policy.counter.add(sec, kindOriginal)
+		if policy.budget != nil {
+			policy.budget.original()
+		}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 			t0 := time.Now()
-			outcome := do(client, *baseURL, op, *accounts, *symbols)
+			outcome := do(client, *baseURL, op, *accounts, *symbols, *hotPct)
+			// Retries are part of the same request: its latency and final
+			// outcome include them, as the caller experiences it.
+			for n := 1; n <= policy.max && retryable(outcome); n++ {
+				if policy.budget != nil && !policy.budget.take() {
+					policy.counter.add(int(time.Since(start)/time.Second), kindDenied)
+					break
+				}
+				time.Sleep(policy.delay(n))
+				policy.counter.add(int(time.Since(start)/time.Second), kindRetry)
+				outcome = do(client, *baseURL, op, *accounts, *symbols, *hotPct)
+			}
 			rec.add(sec, int(time.Since(start)/time.Second), op, time.Since(t0), outcome)
 		}()
 	}
@@ -93,12 +118,23 @@ func main() {
 		log.Fatal(err)
 	}
 	sum := rec.summary()
+	orig, retried, denied := policy.counter.totals()
+	if *retryMode != "none" {
+		if err := policy.counter.writeCSV(filepath.Join(*out, "attempts.csv")); err != nil {
+			log.Fatal(err)
+		}
+	}
 	b, _ := json.MarshalIndent(map[string]any{
 		"rate": *rate, "duration_s": duration.Seconds(), "mix": *mixFlag, "timeout_s": timeout.Seconds(),
 		"started_at": start.UTC().Format(time.RFC3339), "ops": sum,
+		"retry": map[string]any{"mode": *retryMode, "max": policy.max, "budget": *retryBudget,
+			"original_requests": orig, "retries_sent": retried, "retries_denied_by_budget": denied},
 	}, "", "  ")
 	if err := os.WriteFile(filepath.Join(*out, "summary.json"), b, 0o644); err != nil {
 		log.Fatal(err)
+	}
+	if *retryMode != "none" {
+		log.Printf("retry %s: %d original requests, %d retries sent, %d refused by the budget", *retryMode, orig, retried, denied)
 	}
 	for _, op := range sortedKeys(sum) {
 		s := sum[op]
@@ -110,8 +146,11 @@ func main() {
 // do sends one request and returns its outcome: "ok", an error code from the
 // API (for example "deadline" or "lock_timeout"), "http_<status>", or
 // "client_timeout" when the generator gave up first.
-func do(c *http.Client, base, op string, accounts int64, symbols int) string {
+func do(c *http.Client, base, op string, accounts int64, symbols int, hotPct float64) string {
 	acct := 1 + rand.Int64N(accounts)
+	if op == "order" && hotPct > 0 && rand.Float64()*100 < hotPct {
+		acct = 1
+	}
 	sym := fmt.Sprintf("S%04d", 1+rand.IntN(symbols))
 	var req *http.Request
 	switch op {
@@ -121,6 +160,10 @@ func do(c *http.Client, base, op string, accounts int64, symbols int) string {
 		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/accounts/%d/positions", base, acct), nil)
 	case "orders":
 		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/accounts/%d/orders", base, acct), nil)
+	case "report":
+		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/reports/accounts/%d", base, 1+rand.Int64N(max(1, accounts-1000))), nil)
+	case "market":
+		req, _ = http.NewRequest(http.MethodGet, base+"/v1/market/summary", nil)
 	case "activity":
 		req, _ = http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/activity/%s", base, sym), nil)
 	case "order":

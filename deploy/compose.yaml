@@ -64,6 +64,8 @@ services:
       ACQUIRE_TIMEOUT: ${API_ACQUIRE_TIMEOUT:-0}
       MIN_QUERY_BUDGET: ${API_MIN_QUERY_BUDGET:-0}
       CANCEL_MODE: ${API_CANCEL_MODE:-deadline}
+      WRITE_FILLS: ${API_WRITE_FILLS:-0}
+      ORDER_LOCKING: ${API_ORDER_LOCKING:-first}
     depends_on: [pgbouncer]
     ports: ["127.0.0.1:58080:8080"]
     mem_limit: 512m

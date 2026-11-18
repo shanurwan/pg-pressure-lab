@@ -31,7 +31,7 @@ func parseMix(s string) (mix, error) {
 			return m, fmt.Errorf("mix entry %q: bad weight", part)
 		}
 		switch name {
-		case "account", "positions", "orders", "order", "activity":
+		case "account", "positions", "orders", "order", "activity", "report", "market":
 		default:
 			return m, fmt.Errorf("mix entry %q: unknown operation", part)
 		}

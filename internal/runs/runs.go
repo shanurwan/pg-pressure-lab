@@ -32,6 +32,9 @@ type Run struct {
 	OrderP99ms       float64        `json:"order_p99_ms"`
 	ReadP99ms        float64        `json:"read_p99_ms"`
 	Errors           map[string]int `json:"errors"`
+	Trigger          string         `json:"trigger,omitempty"` // the job counted as the incident: batch, migration, lock, idle_tx
+	RetriesSent      int            `json:"retries_sent,omitempty"`
+	RetriesDenied    int            `json:"retries_denied_by_budget,omitempty"`
 	BatchSeconds     float64        `json:"batch_seconds,omitempty"`
 	BatchRetries     int            `json:"batch_lock_timeout_retries,omitempty"`
 	BatchError       string         `json:"batch_error,omitempty"`
@@ -55,6 +58,27 @@ type opSummary struct {
 type summary struct {
 	StartedAt string               `json:"started_at"`
 	Ops       map[string]opSummary `json:"ops"`
+	Retry     *struct {
+		Sent   int `json:"retries_sent"`
+		Denied int `json:"retries_denied_by_budget"`
+	} `json:"retry"`
+}
+
+// trigger returns the name of the job that counts as the incident in a run
+// and reads its result file. Older runs only have batch.json.
+func trigger(dir string) (string, batchResult, bool) {
+	var meta struct {
+		Trigger string `json:"trigger"`
+	}
+	name := "batch"
+	if readJSON(filepath.Join(dir, "meta.json"), &meta) == nil && meta.Trigger != "" {
+		name = meta.Trigger
+	}
+	var b batchResult
+	if readJSON(filepath.Join(dir, name+".json"), &b) != nil {
+		return name, b, false
+	}
+	return name, b, true
 }
 
 type batchResult struct {
@@ -148,6 +172,9 @@ func Load(results, id string) (Run, error) {
 	if len(readP99) > 0 {
 		r.ReadP99ms = slices.Max(readP99)
 	}
+	if sum.Retry != nil {
+		r.RetriesSent, r.RetriesDenied = sum.Retry.Sent, sum.Retry.Denied
+	}
 	if r.Requests > 0 {
 		r.FailedPct = math.Round(10000*float64(r.Failed)/float64(r.Requests)) / 100
 	}
@@ -166,8 +193,8 @@ func Load(results, id string) (Run, error) {
 		}
 	}
 
-	var b batchResult
-	if readJSON(filepath.Join(dir, "batch.json"), &b) == nil {
+	if name, b, ok := trigger(dir); ok {
+		r.Trigger = name
 		r.BatchSeconds, r.BatchRetries, r.BatchError = b.Seconds, b.Retries, b.Error
 		loadStart, err1 := time.Parse(time.RFC3339, sum.StartedAt)
 		batchStart, err2 := time.Parse(time.RFC3339Nano, b.StartedAt)
@@ -235,12 +262,18 @@ func Markdown(rs []Run) string {
 		if errs == "" {
 			errs = "none"
 		}
+		if r.RetriesSent > 0 || r.RetriesDenied > 0 {
+			errs += fmt.Sprintf("; %d retries sent, %d refused by budget", r.RetriesSent, r.RetriesDenied)
+		}
 		batch := "none"
 		switch {
 		case r.BatchError != "":
-			batch = fmt.Sprintf("failed after %.0f s", r.BatchSeconds)
+			batch = fmt.Sprintf("%s ended with an error after %.0f s", r.Trigger, r.BatchSeconds)
 		case r.BatchSeconds > 0:
 			batch = fmt.Sprintf("%.0f s", r.BatchSeconds)
+			if r.Trigger != "" && r.Trigger != "batch" {
+				batch = r.Trigger + " " + batch
+			}
 			if r.BatchRetries > 0 {
 				batch += fmt.Sprintf(", %d retries", r.BatchRetries)
 			}
@@ -267,7 +300,7 @@ type Second struct {
 // signals are the sampler columns, in the order they are reported.
 var signals = []string{"longest_xact_s", "pg_lock_wait", "pg_idle_in_tx", "pg_active", "pool_acquired",
 	"pool_empty_acquires", "bouncer_cl_waiting", "bouncer_maxwait_ms", "pg_total", "pg_sessions_started",
-	"pg_sessions_abandoned"}
+	"pg_sessions_abandoned", "quotes_dead_tup", "quotes_bytes", "oldest_xmin_age"}
 
 // Timeline returns the run second by second, joining the load generator's
 // seconds to the sampler's rows by wall-clock second.
@@ -323,10 +356,12 @@ func Timeline(results, id string) ([]Second, error) {
 				db[k] = atof(v)
 			}
 		}
+		if v, ok := row["int4_ids_left"]; ok && v != "" {
+			db["int4_ids_left"] = atof(v)
+		}
 		samp[row["t"][:19]] = db
 	}
-	var b batchResult
-	hasBatch := readJSON(filepath.Join(dir, "batch.json"), &b) == nil
+	trig, b, hasBatch := trigger(dir)
 	bStart, bEnd := -1, -1
 	if hasBatch {
 		if bs, err := time.Parse(time.RFC3339Nano, b.StartedAt); err == nil {
@@ -342,10 +377,10 @@ func Timeline(results, id string) ([]Second, error) {
 		}
 		s.DB = samp[start.Add(time.Duration(t)*time.Second).UTC().Format("2006-01-02T15:04:05")]
 		if t == bStart {
-			s.Events = append(s.Events, "batch_start")
+			s.Events = append(s.Events, trig+"_start")
 		}
 		if t == bEnd {
-			s.Events = append(s.Events, "batch_end")
+			s.Events = append(s.Events, trig+"_end")
 		}
 		out = append(out, *s)
 	}
@@ -372,12 +407,14 @@ func FirstSignals(results, id string) (firstFailure int, out []Signal, err error
 	}
 	bStart := -1
 	for _, s := range tl {
-		if slices.Contains(s.Events, "batch_start") {
-			bStart = s.T
+		for _, e := range s.Events {
+			if strings.HasSuffix(e, "_start") {
+				bStart = s.T
+			}
 		}
 	}
 	if bStart < 0 {
-		return 0, nil, fmt.Errorf("run %s has no batch", id)
+		return 0, nil, fmt.Errorf("run %s has no trigger job", id)
 	}
 	firstFailure = -1
 	for _, s := range tl {

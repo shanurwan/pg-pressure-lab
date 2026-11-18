@@ -44,7 +44,7 @@ func main() {
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "pg-pressure-lab", Version: "0.1.0"}, nil)
 	mcp.AddTool(s, &mcp.Tool{Name: "list_rounds",
-		Description: "List the rounds of a scenario (batch or conn) with what each round changes."}, l.listRounds)
+		Description: "List the rounds of a scenario (batch, conn, migration, retry, xmin, overflow, hotrow) with what each round changes."}, l.listRounds)
 	mcp.AddTool(s, &mcp.Tool{Name: "list_runs",
 		Description: "Recorded runs of a scenario with their headline numbers: requests, failures, p99, " +
 			"failures after the batch ended, time to recover, max lock waiters, PgBouncer queue, longest " +
@@ -53,7 +53,7 @@ func main() {
 		Description: "One run, second by second: requests, successes, worst p99, errors by code, and what " +
 			"PostgreSQL, PgBouncer and the API pool showed in that second. Use from_s/to_s to zoom in."}, l.timeline)
 	mcp.AddTool(s, &mcp.Tool{Name: "first_signals",
-		Description: "For a run with a batch: which signals rose above their pre-batch maximum first, and " +
+		Description: "For a run with a trigger job (batch, migration, lock, idle_tx): which signals rose above their pre-trigger maximum first, and " +
 			"how many seconds before the first failed request. Answers 'what should we have alerted on?'"}, l.firstSignals)
 	mcp.AddTool(s, &mcp.Tool{Name: "run_drill",
 		Description: "Run one round on the local lab (scripts/lab run) and return its numbers. Takes about " +
@@ -68,7 +68,7 @@ func main() {
 var name = regexp.MustCompile(`^[a-z][a-z0-9-]{0,40}$`)
 
 type scenarioIn struct {
-	Scenario string `json:"scenario" jsonschema:"batch or conn"`
+	Scenario string `json:"scenario" jsonschema:"a scenario: batch, conn, migration, retry, xmin, overflow or hotrow"`
 }
 
 type roundsOut struct {
@@ -103,7 +103,7 @@ func (l *lab) listRounds(ctx context.Context, _ *mcp.CallToolRequest, in scenari
 }
 
 type listRunsIn struct {
-	Scenario string   `json:"scenario" jsonschema:"batch or conn"`
+	Scenario string   `json:"scenario" jsonschema:"a scenario: batch, conn, migration, retry, xmin, overflow or hotrow"`
 	Rounds   []string `json:"rounds,omitempty" jsonschema:"optional round order, e.g. [baseline naive chunked]"`
 }
 
@@ -178,7 +178,7 @@ func (l *lab) firstSignals(_ context.Context, _ *mcp.CallToolRequest, in runIDIn
 }
 
 type runDrillIn struct {
-	Scenario  string `json:"scenario" jsonschema:"batch or conn"`
+	Scenario  string `json:"scenario" jsonschema:"a scenario: batch, conn, migration, retry, xmin, overflow or hotrow"`
 	Round     string `json:"round" jsonschema:"a round from list_rounds"`
 	Rate      int    `json:"rate,omitempty" jsonschema:"requests per second, 1 to 2000 (default 300)"`
 	DurationS int    `json:"duration_s,omitempty" jsonschema:"seconds of load, 20 to 600 (default 180)"`

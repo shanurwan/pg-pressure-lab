@@ -5,13 +5,14 @@
 #   scripts/lab seed                    load data (ACCOUNTS, SYMBOLS, ORDERS)
 #   scripts/lab run <scenario> <round>  one recorded run; results/<scenario>/<round>/<time>/
 #   scripts/lab rounds <scenario>       list a scenario's rounds
+#   scripts/lab scenarios               list the scenarios
 #   scripts/lab live                    the interactive replays at http://localhost:58090, streaming
 #                                       whichever run is in progress
 #   scripts/lab psql                    a psql shell on the primary
 #   scripts/lab down                    stop and delete everything, data included
 #
 # Tunables (environment): RATE (req/s, default 300), DURATION (default 180s),
-# BATCH_AT (seconds into the run when the batch starts, default 30).
+# BATCH_AT (seconds into the run when the trigger job starts, default 30).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,16 +28,34 @@ APP_URL='postgres://app@pgbouncer:6432/lab?pool_max_conns=40&default_query_exec_
 REPORT_URL='postgres://report@pgbouncer:6432/lab_report?pool_max_conns=3&default_query_exec_mode=exec'
 BATCH_SHARED='postgres://batch@pgbouncer:6432/lab?default_query_exec_mode=exec'
 BATCH_OWN='postgres://batch@pgbouncer:6432/lab_batch?default_query_exec_mode=exec'
+# Jobs that change the schema or take table locks connect straight to
+# PostgreSQL as the owner; jobs standing in for an application session use
+# the batch role, so per-role settings apply to them.
+ADMIN_DIRECT='postgres://postgres@pg-primary:5432/lab'
+BATCH_DIRECT='postgres://batch@pg-primary:5432/lab'
 
 psql_admin() { "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v ON_ERROR_STOP=1 -qAt "$@"; }
 
-# round <scenario> <round>: sets MIX, API_* variables, ROLE_SQL and BATCH_ARGS.
+# Highest order id that still fits a 32-bit integer.
+INT4_MAX=2147483647
+
+# round <scenario> <round> sets, for one round:
+#   MIX        the load generator's operation weights
+#   API_*      the API's pools and behaviour
+#   ROLE_SQL   per-role settings (reset before every run)
+#   PRE_SQL    statements run, one by one, before the run starts
+#   LOAD_ARGS  extra load generator flags
+#   JOBS       "<seconds>|<name>|<command>" entries started during the run; the
+#              command's {out} becomes the job's result file
+#   TRIGGER    the job whose window counts as "the incident" in reports
 # Each round changes one thing from the one before it.
 round() {
   MIX='account=40,positions=25,orders=10,order=25'
   API_DATABASE_URL=$APP_URL API_READ_DATABASE_URL='' API_REPORT_DATABASE_URL='' API_REQUEST_TIMEOUT=2s
   API_ACQUIRE_TIMEOUT=0 API_MIN_QUERY_BUDGET=0 API_CANCEL_MODE=deadline
-  ROLE_SQL='' BATCH_ARGS=''
+  API_WRITE_FILLS=0 API_ORDER_LOCKING=first
+  ROLE_SQL='' BATCH_ARGS='' LOAD_ARGS='' TRIGGER=''
+  PRE_SQL=() JOBS=()
   case "$1/$2" in
     # Overnight batch against live traffic.
     batch/baseline)  ;;                                            # no batch: the reference
@@ -52,19 +71,84 @@ round() {
                      BATCH_ARGS="-mode naive -dsn $BATCH_SHARED"
                      API_CANCEL_MODE=cancel_request ;;
     batch/chunked)   BATCH_ARGS="-mode chunked -dsn $BATCH_OWN -chunk 1000 -lock-timeout 100ms" ;;
-    # A slow query that shares the pool with everything else.
+
+    # A slow report that shares the pool with everything else. The report reads
+    # a year of orders for 1,000 accounts: a few hundred milliseconds alone.
     conn/baseline)   ;;
-    conn/shared)     MIX='account=39,positions=25,orders=10,order=25,activity=1' ;;
-    conn/bulkhead)   MIX='account=39,positions=25,orders=10,order=25,activity=1'
+    conn/shared)     MIX='account=37,positions=25,orders=10,order=25,report=3' ;;
+    conn/bulkhead)   MIX='account=37,positions=25,orders=10,order=25,report=3'
                      API_REPORT_DATABASE_URL=$REPORT_URL ;;
     conn/bulkhead-timeout)
-                     MIX='account=39,positions=25,orders=10,order=25,activity=1'
+                     MIX='account=37,positions=25,orders=10,order=25,report=3'
                      API_REPORT_DATABASE_URL=$REPORT_URL
                      ROLE_SQL="ALTER ROLE report SET statement_timeout = '1s';" ;;
+
+    # Schema changes on hot tables. The API cancels timed-out queries with a
+    # cancel request (the setting that recovered in the batch drill), so what
+    # is measured is the lock queue itself, not the reconnect loop.
+    migration/alter-naive)
+                     API_CANCEL_MODE=cancel_request TRIGGER=migration
+                     JOBS=("$BATCH_AT|migration|/app/migrate -mode alter-naive -hold 45s -dsn $ADMIN_DIRECT -out {out}") ;;
+    migration/alter-locktimeout)
+                     API_CANCEL_MODE=cancel_request TRIGGER=migration
+                     JOBS=("$BATCH_AT|migration|/app/migrate -mode alter-locktimeout -lock-timeout 1s -hold 45s -dsn $ADMIN_DIRECT -out {out}") ;;
+    migration/index-plain)
+                     API_CANCEL_MODE=cancel_request TRIGGER=migration
+                     JOBS=("$BATCH_AT|migration|/app/migrate -mode index-plain -dsn $ADMIN_DIRECT -out {out}") ;;
+    migration/index-concurrently)
+                     API_CANCEL_MODE=cancel_request TRIGGER=migration
+                     JOBS=("$BATCH_AT|migration|/app/migrate -mode index-concurrently -dsn $ADMIN_DIRECT -out {out}") ;;
+
+    # Clients retrying into a short outage: a 15 s exclusive lock on accounts.
+    retry/no-retry)  TRIGGER=lock
+                     JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
+    retry/retry-immediate)
+                     TRIGGER=lock LOAD_ARGS='-retry immediate -retries 3'
+                     JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
+    retry/retry-backoff-budget)
+                     TRIGGER=lock LOAD_ARGS='-retry backoff -retries 3 -retry-budget 0.1'
+                     JOBS=("$BATCH_AT|lock|/app/migrate -mode lock -hold 15s -dsn $ADMIN_DIRECT -out {out}") ;;
+
+    # A forgotten idle transaction holds back the xmin horizon while a feed
+    # updates quotes 2,000 times a second; market summaries scan quotes.
+    xmin/baseline)   MIX='account=35,positions=20,orders=10,order=20,market=15'
+                     PRE_SQL=("VACUUM (FULL, ANALYZE) quotes")
+                     JOBS=("0|churn|/app/churn -rate 2000 -duration $DURATION -dsn $ADMIN_DIRECT -out {out}") ;;
+    xmin/idle-tx)    MIX='account=35,positions=20,orders=10,order=20,market=15' TRIGGER=idle_tx
+                     PRE_SQL=("VACUUM (FULL, ANALYZE) quotes")
+                     JOBS=("0|churn|/app/churn -rate 2000 -duration $DURATION -dsn $ADMIN_DIRECT -out {out}"
+                           "$BATCH_AT|idle_tx|/app/migrate -mode idle-tx -hold 140s -dsn $BATCH_DIRECT -out {out}") ;;
+    xmin/idle-tx-timeout)
+                     MIX='account=35,positions=20,orders=10,order=20,market=15' TRIGGER=idle_tx
+                     ROLE_SQL="ALTER ROLE batch SET idle_in_transaction_session_timeout = '10s';"
+                     PRE_SQL=("VACUUM (FULL, ANALYZE) quotes")
+                     JOBS=("0|churn|/app/churn -rate 2000 -duration $DURATION -dsn $ADMIN_DIRECT -out {out}"
+                           "$BATCH_AT|idle_tx|/app/migrate -mode idle-tx -hold 140s -dsn $BATCH_DIRECT -out {out}") ;;
+
+    # A 32-bit column pointing at a 64-bit key, about 60 s from running out.
+    overflow/int4)   API_WRITE_FILLS=1
+                     PRE_SQL=("TRUNCATE order_fills" "DELETE FROM orders WHERE id > $INT4_MAX - 50000"
+                              "ALTER TABLE order_fills ALTER COLUMN order_id TYPE integer"
+                              "SELECT setval('orders_id_seq', $INT4_MAX - 4500)") ;;
+    overflow/bigint) API_WRITE_FILLS=1
+                     PRE_SQL=("TRUNCATE order_fills" "DELETE FROM orders WHERE id > $INT4_MAX - 50000"
+                              "ALTER TABLE order_fills ALTER COLUMN order_id TYPE bigint"
+                              "SELECT setval('orders_id_seq', $INT4_MAX - 4500)") ;;
+
+    # Half of all orders land on one account row (an omnibus account).
+    hotrow/baseline) MIX='account=20,positions=10,orders=10,order=60' ;;
+    hotrow/hot)      MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 50' ;;
+    hotrow/hot-locklast)
+                     MIX='account=20,positions=10,orders=10,order=60' LOAD_ARGS='-hot-pct 50'
+                     API_ORDER_LOCKING=last ;;
     *) echo "unknown round $1/$2 (see: scripts/lab rounds $1)" >&2; exit 2 ;;
   esac
+  if [[ -n $BATCH_ARGS ]]; then
+    TRIGGER=batch
+    JOBS=("$BATCH_AT|batch|/app/batch $BATCH_ARGS -out {out}")
+  fi
   export API_DATABASE_URL API_READ_DATABASE_URL API_REPORT_DATABASE_URL API_REQUEST_TIMEOUT \
-    API_ACQUIRE_TIMEOUT API_MIN_QUERY_BUDGET API_CANCEL_MODE
+    API_ACQUIRE_TIMEOUT API_MIN_QUERY_BUDGET API_CANCEL_MODE API_WRITE_FILLS API_ORDER_LOCKING
 }
 
 wait_api() {
@@ -75,12 +159,20 @@ wait_api() {
   echo "api did not become healthy" >&2; "${DC[@]}" logs --tail 50 api >&2; exit 1
 }
 
+json_escape() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; printf '%s' "$s"; }
+
 cmd_run() {
   local scenario=$1 rnd=$2
   round "$scenario" "$rnd"
   local stamp; stamp=$(date -u +%Y%m%dT%H%M%SZ)
   local rel="$scenario/$rnd/$stamp" dir="results/$scenario/$rnd/$stamp"
   mkdir -p "$dir"
+
+  # Undo what migration drills leave behind, then this scenario's tables.
+  "${DC[@]}" run --rm tools /app/migrate -mode cleanup -dsn "$ADMIN_DIRECT" >/dev/null 2>&1
+  psql_admin <deploy/postgres/scenarios.sql >/dev/null
+  local s
+  for s in "${PRE_SQL[@]}"; do psql_admin -c "$s" >/dev/null; done
 
   psql_admin -c "ALTER ROLE app RESET ALL; ALTER ROLE batch RESET ALL; ALTER ROLE report RESET ALL; $ROLE_SQL"
   "${DC[@]}" up -d --force-recreate api >/dev/null 2>&1
@@ -90,37 +182,44 @@ cmd_run() {
   psql_admin -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename IN ('app','batch','report');" >/dev/null
   psql_admin -c "SELECT pg_stat_statements_reset();" >/dev/null
 
+  local jobs_json='' pre_json='' j
+  for j in "${JOBS[@]}"; do jobs_json+="${jobs_json:+,}\"$(json_escape "$j")\""; done
+  for s in "${PRE_SQL[@]}"; do pre_json+="${pre_json:+,}\"$(json_escape "$s")\""; done
   cat >"$dir/meta.json" <<EOF
 {"scenario":"$scenario","round":"$rnd","rate":$RATE,"duration":"$DURATION","batch_at_s":$BATCH_AT,
- "mix":"$MIX","batch_args":"${BATCH_ARGS//\"/\\\"}","role_sql":"${ROLE_SQL//\"/\\\"}",
+ "mix":"$MIX","batch_args":"$(json_escape "$BATCH_ARGS")","role_sql":"$(json_escape "$ROLE_SQL")",
  "api_report_pool":"${API_REPORT_DATABASE_URL:+separate}","api_request_timeout":"$API_REQUEST_TIMEOUT",
  "api_acquire_timeout":"$API_ACQUIRE_TIMEOUT","api_min_query_budget":"$API_MIN_QUERY_BUDGET",
- "api_cancel_mode":"$API_CANCEL_MODE",
+ "api_cancel_mode":"$API_CANCEL_MODE","api_write_fills":"$API_WRITE_FILLS","api_order_locking":"$API_ORDER_LOCKING",
+ "load_args":"$(json_escape "$LOAD_ARGS")","pre_sql":[$pre_json],"jobs":[$jobs_json],"trigger":"$TRIGGER",
  "commit":"$(git rev-parse --short HEAD 2>/dev/null || echo none)","started_utc":"$stamp"}
 EOF
 
   "${DC[@]}" run -d --rm --name pgpl-sampler tools /app/sampler -out "/results/$rel/sampler.csv" >/dev/null
   # Markers for the live view: the wall-clock second and what happened.
   event() { printf '{"wall":"%s","event":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$dir/events.jsonl"; }
-  local batch_pid=''
-  if [[ -n $BATCH_ARGS ]]; then
-    ( sleep "$BATCH_AT"
-      event batch_start
+  local pids=() at name cmd
+  for j in "${JOBS[@]}"; do
+    IFS='|' read -r at name cmd <<<"$j"
+    cmd=${cmd//\{out\}/\/results\/$rel\/$name.json}
+    ( sleep "$at"
+      event "${name}_start"
       # shellcheck disable=SC2086
-      "${DC[@]}" run --rm tools /app/batch $BATCH_ARGS -out "/results/$rel/batch.json" >"$dir/batch.log" 2>&1 || true
-      event batch_end
-    ) & batch_pid=$!
-  fi
-  "${DC[@]}" run --rm tools /app/load -rate "$RATE" -duration "$DURATION" -mix "$MIX" \
+      "${DC[@]}" run --rm tools $cmd >"$dir/$name.log" 2>&1 || true
+      event "${name}_end"
+    ) & pids+=($!)
+  done
+  # shellcheck disable=SC2086
+  "${DC[@]}" run --rm tools /app/load -rate "$RATE" -duration "$DURATION" -mix "$MIX" $LOAD_ARGS \
     -out "/results/$rel" -live "/results/$rel/live.jsonl" 2>&1 | tee "$dir/load.log"
-  [[ -n $batch_pid ]] && wait "$batch_pid"
+  for j in "${pids[@]}"; do wait "$j" || true; done
   docker stop pgpl-sampler >/dev/null 2>&1 || true
 
   psql_admin -F $'\t' -c "SELECT calls, round(total_exec_time::numeric,1) AS total_ms,
       round(mean_exec_time::numeric,2) AS mean_ms, round(max_exec_time::numeric,1) AS max_ms,
       left(regexp_replace(query, '\s+', ' ', 'g'), 120)
     FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 15" >"$dir/pg_stat_statements.tsv"
-  "${DC[@]}" logs --since "$stamp" pg-primary 2>/dev/null | grep -E 'still waiting|acquired|deadlock|duration:' \
+  "${DC[@]}" logs --since "$stamp" pg-primary 2>/dev/null | grep -E 'still waiting|acquired|deadlock|duration:|out of range|terminating' \
     >"$dir/pg_log_excerpt.txt" || true
   echo "results: $dir"
 }
@@ -134,12 +233,13 @@ case "${1:-}" in
     "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v accounts="$ACCOUNTS" -v symbols="$SYMBOLS" \
       -v orders="$ORDERS" -f /seed/seed.sql ;;
   run)    [[ $# -eq 3 ]] || { echo "usage: $0 run <scenario> <round>" >&2; exit 2; }; cmd_run "$2" "$3" ;;
-  rounds) grep -oE "^ *$2/[a-z-]+\)" "$0" | sed -E "s/ *$2\/(.*)\)/\1/" ;;
+  rounds) grep -oE "^ *$2/[a-z0-9-]+\)" "$0" | sed -E "s/ *$2\/(.*)\)/\1/" ;;
+  scenarios) grep -oE "^ *[a-z]+/[a-z0-9-]+\)" "$0" | sed -E 's/^ *([a-z]+)\/.*/\1/' | uniq ;;
   live)
     "${DC[@]}" --profile live up -d live >/dev/null
     echo "open http://localhost:58090/?live=1, then start a run in another terminal, for example:"
     echo "  scripts/lab run batch naive" ;;
   psql)   "${DC[@]}" exec pg-primary psql -U postgres -d lab ;;
   down)   "${DC[@]}" --profile tools --profile live down -v ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  *) sed -n '2,16p' "$0"; exit 2 ;;
 esac

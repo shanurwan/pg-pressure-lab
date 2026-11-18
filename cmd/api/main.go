@@ -45,6 +45,13 @@ type server struct {
 	timeout        time.Duration
 	acquireTimeout time.Duration
 	minBudget      time.Duration
+	order          orderOptions
+}
+
+// orderOptions are the scenario switches for order placement.
+type orderOptions struct {
+	writeFills bool // also record a fill whose order_id column is a 32-bit integer
+	lockLast   bool // reserve buying power in one conditional UPDATE at the end
 }
 
 func main() {
@@ -53,6 +60,10 @@ func main() {
 		timeout:        mustDuration("REQUEST_TIMEOUT", "2s"),
 		acquireTimeout: mustDuration("ACQUIRE_TIMEOUT", "0"),
 		minBudget:      mustDuration("MIN_QUERY_BUDGET", "0"),
+		order: orderOptions{
+			writeFills: os.Getenv("WRITE_FILLS") == "1",
+			lockLast:   getenv("ORDER_LOCKING", "first") == "last",
+		},
 	}
 	s.write = mustPool(ctx, "DATABASE_URL", os.Getenv("DATABASE_URL"))
 	s.read = s.write
@@ -69,6 +80,8 @@ func main() {
 	mux.HandleFunc("GET /v1/accounts/{id}/positions", s.handle(s.positions))
 	mux.HandleFunc("GET /v1/accounts/{id}/orders", s.handle(s.orders))
 	mux.HandleFunc("GET /v1/activity/{symbol}", s.handle(s.activity))
+	mux.HandleFunc("GET /v1/reports/accounts/{id}", s.handle(s.accountReport))
+	mux.HandleFunc("GET /v1/market/summary", s.handle(s.marketSummary))
 	mux.HandleFunc("POST /v1/orders", s.handle(s.placeOrder))
 	mux.HandleFunc("GET /debug/pools", s.pools)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -193,6 +206,8 @@ func classify(err error) *apiError {
 			return &apiError{http.StatusServiceUnavailable, "lock_timeout"}
 		case "40P01":
 			return &apiError{http.StatusServiceUnavailable, "deadlock"}
+		case "22003":
+			return &apiError{http.StatusInternalServerError, "integer_out_of_range"}
 		case "53300":
 			return &apiError{http.StatusServiceUnavailable, "too_many_connections"}
 		}
@@ -304,6 +319,51 @@ func (s *server) activity(ctx context.Context, r *http.Request) (any, error) {
 	return out, err
 }
 
+type blockReport struct {
+	Day    time.Time `json:"day"`
+	Orders int64     `json:"orders"`
+	Qty    float64   `json:"qty"`
+}
+
+// accountReport is a slow but finishable report: a year of orders for a block
+// of 1,000 accounts, read through the (account_id, created_at) index. Alone it
+// takes a few hundred milliseconds; under load it holds a pooled connection
+// that long, which is the point of the conn drill.
+func (s *server) accountReport(ctx context.Context, r *http.Request) (any, error) {
+	id, err := pathID(r)
+	if err != nil {
+		return nil, err
+	}
+	var out []blockReport
+	err = s.withConn(ctx, s.report, func(c *pgxpool.Conn) error {
+		rows, _ := c.Query(ctx,
+			`SELECT date_trunc('month', created_at) AS day, count(*), coalesce(sum(qty), 0)
+			   FROM orders WHERE account_id BETWEEN $1 AND $1 + 999
+			  GROUP BY 1 ORDER BY 1 DESC`, id)
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[blockReport])
+		return err
+	})
+	return out, err
+}
+
+type marketSummary struct {
+	Symbols   int64   `json:"symbols"`
+	AvgSpread float64 `json:"avg_spread"`
+}
+
+// marketSummary scans the quotes table, which a feed updates thousands of
+// times a second. With 2,000 live rows it is quick, as long as VACUUM can
+// remove the dead row versions; when something holds back the xmin horizon,
+// every scan reads more pages and it slows down.
+func (s *server) marketSummary(ctx context.Context, _ *http.Request) (any, error) {
+	var m marketSummary
+	err := s.withConn(ctx, s.read, func(c *pgxpool.Conn) error {
+		return c.QueryRow(ctx, `SELECT count(*), coalesce(avg(ask - bid), 0) FROM quotes`).
+			Scan(&m.Symbols, &m.AvgSpread)
+	})
+	return m, err
+}
+
 type orderRequest struct {
 	AccountID  int64   `json:"account_id"`
 	Symbol     string  `json:"symbol"`
@@ -328,7 +388,10 @@ func (s *server) placeOrder(ctx context.Context, r *http.Request) (any, error) {
 	var id int64
 	err := s.withConn(ctx, s.write, func(c *pgxpool.Conn) error {
 		return pgx.BeginFunc(ctx, c, func(tx pgx.Tx) error {
-			return placeOrderTx(ctx, tx, req, &id)
+			if s.order.lockLast {
+				return placeOrderLockLast(ctx, tx, req, s.order, &id)
+			}
+			return placeOrderTx(ctx, tx, req, s.order, &id)
 		})
 	})
 	if err != nil {
@@ -337,7 +400,9 @@ func (s *server) placeOrder(ctx context.Context, r *http.Request) (any, error) {
 	return map[string]int64{"id": id}, nil
 }
 
-func placeOrderTx(ctx context.Context, tx pgx.Tx, req orderRequest, id *int64) error {
+// placeOrderTx locks the account row first (SELECT ... FOR UPDATE), checks,
+// reserves, and records the order: the lock is held for every step.
+func placeOrderTx(ctx context.Context, tx pgx.Tx, req orderRequest, o orderOptions, id *int64) error {
 	var bp float64
 	if err := tx.QueryRow(ctx,
 		`SELECT buying_power FROM accounts WHERE id = $1 AND status = 'ACTIVE' FOR UPDATE`,
@@ -355,10 +420,54 @@ func placeOrderTx(ctx context.Context, tx pgx.Tx, req orderRequest, id *int64) e
 			return err
 		}
 	}
-	return tx.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`INSERT INTO orders (account_id, symbol, side, qty, limit_price, status)
 		 VALUES ($1, $2, $3, $4, $5, 'accepted') RETURNING id`,
-		req.AccountID, req.Symbol, req.Side, req.Qty, req.LimitPrice).Scan(id)
+		req.AccountID, req.Symbol, req.Side, req.Qty, req.LimitPrice).Scan(id); err != nil {
+		return err
+	}
+	return writeFill(ctx, tx, o, *id)
+}
+
+// placeOrderLockLast records the order first and takes the account row lock
+// last, in one conditional UPDATE, so the lock is held only until COMMIT.
+func placeOrderLockLast(ctx context.Context, tx pgx.Tx, req orderRequest, o orderOptions, id *int64) error {
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO orders (account_id, symbol, side, qty, limit_price, status)
+		 SELECT $1, $2, $3, $4, $5, 'accepted' FROM accounts WHERE id = $1 AND status = 'ACTIVE'
+		 RETURNING id`,
+		req.AccountID, req.Symbol, req.Side, req.Qty, req.LimitPrice).Scan(id); err != nil {
+		return err
+	}
+	if err := writeFill(ctx, tx, o, *id); err != nil {
+		return err
+	}
+	if req.Side != "buy" {
+		return nil
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE accounts SET buying_power = buying_power - $2, updated_at = now()
+		  WHERE id = $1 AND buying_power >= $2`, req.AccountID, req.Qty*req.LimitPrice)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return &apiError{http.StatusUnprocessableEntity, "insufficient_buying_power"}
+	}
+	return nil
+}
+
+// writeFill records a fill for the order when WRITE_FILLS=1. The order_fills
+// table's order_id column is a 32-bit integer pointing at a 64-bit key: it
+// works until orders.id passes 2,147,483,647.
+func writeFill(ctx context.Context, tx pgx.Tx, o orderOptions, id int64) error {
+	if !o.writeFills {
+		return nil
+	}
+	// The parameter is sent as bigint so PostgreSQL itself does the narrowing
+	// (and raises 22003), exactly as an ORM passing a 64-bit id would.
+	_, err := tx.Exec(ctx, `INSERT INTO order_fills (order_id) VALUES ($1::bigint)`, id)
+	return err
 }
 
 type poolStats struct {
