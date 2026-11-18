@@ -250,7 +250,7 @@ func afterBatch(perSec map[int][2]int, end float64) (failed int, recovery string
 // Markdown renders runs as the comparison table used in the README.
 func Markdown(rs []Run) string {
 	var b strings.Builder
-	b.WriteString("| Round | Run (UTC) | Rate | Requests | Failed | Seconds with failures | Worst second | Order p99 | Read p99 | Errors | Batch | Failed after batch ended | Recovered | Max lock waiters | Max PgBouncer queue | Longest transaction | Max new sessions/s |\n")
+	b.WriteString("| Round | Run (UTC) | Rate | Requests | Failed | Seconds with failures | Worst second | Order p99 | Read p99 | Errors | Trigger job | Failed after it ended | Recovered | Max lock waiters | Max PgBouncer queue | Longest transaction | Max new sessions/s |\n")
 	b.WriteString("|---|---|--:|--:|--:|--:|--:|--:|--:|---|---|--:|---|--:|--:|--:|--:|\n")
 	for _, r := range rs {
 		var codes []string
