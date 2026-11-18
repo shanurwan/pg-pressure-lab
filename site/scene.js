@@ -269,7 +269,13 @@ export async function createScene(canvas, labelsEl, { reduceMotion, onLost }) {
       L[k].style.top = `${((1 - v.y) / 2) * h}px`;
     }
   }
-  function render() { renderer.render(scene, camera); place(); }
+  // A lost or broken WebGL context makes three.js throw while rendering;
+  // stop drawing and show the no-WebGL notice instead of throwing every frame.
+  let dead = false;
+  function render() {
+    if (dead) return;
+    try { renderer.render(scene, camera); place(); } catch { dead = true; onLost?.(true); }
+  }
 
   let last = performance.now(), visible = true;
   new IntersectionObserver(([e]) => (visible = e.isIntersecting)).observe(canvas);

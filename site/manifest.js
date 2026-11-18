@@ -258,3 +258,37 @@ export const STEPS = [
   { id: "fix", label: "Fix" },
   { id: "alert", label: "What to alert on" },
 ];
+
+// Mission objectives. A mission without an entry here gets a standard set
+// (baseline, incident, first-signal quiz, fix, best-fix quiz, report) built
+// from its rounds. Types:
+//   command  completes when the terminal runs a matching command
+//   observe  completes when the replay reaches a moment
+//   quiz     multiple choice; `quiz: "firstSignal" | "bestFix"` take their
+//            options and the right answer from the recorded runs
+export const OBJECTIVES = {
+  batch: [
+    { id: "baseline", type: "command", xp: 50, text: "Run the baseline: the same traffic with no batch job", match: { run: ["baseline"] } },
+    { id: "outage", type: "command", xp: 50, text: "Trigger the outage: replay the naive batch", match: { run: ["naive"] } },
+    { id: "watch", type: "observe", xp: 50, text: "Watch the batch commit, and the errors carry on", observe: { round: "naive", afterJobEnd: 10, needFailures: true } },
+    {
+      id: "why", type: "quiz", xp: 100, badge: "root-cause",
+      q: "The batch committed and released its locks. Why did requests keep failing?",
+      options: [
+        "PostgreSQL held the batch's row locks until autovacuum ran",
+        "Requests waited out their deadline for a pool connection, were cancelled mid-query, and each cancellation closed a connection that PgBouncer and PostgreSQL had to rebuild",
+        "The load generator sent more requests once errors started",
+        "PgBouncer was restarted by its health check",
+      ],
+      answer: 1,
+      explain(ctx) {
+        const s = ctx.range("naive", "max_sessions_per_s", ctx.fmt.n);
+        return `Locks are released at commit, and the load is open loop at a fixed rate. What sustains the outage is the loop: a request waits almost its whole 2 s budget for a connection, starts a query with milliseconds left and is cancelled; pgx's default closes that connection, so PgBouncer drops its server connection too${s ? `, and PostgreSQL started up to ${s} new sessions a second` : ""}. The trigger is gone; the failure keeps itself going.`;
+      },
+    },
+    { id: "signal", type: "quiz", quiz: "firstSignal", xp: 100, badge: "early-warning" },
+    { id: "fix", type: "command", xp: 100, text: "Ship a fix: replay chunked, naive-cancelreq or naive-failfast", match: { run: ["chunked", "naive-cancelreq", "naive-failfast"] } },
+    { id: "best", type: "quiz", quiz: "bestFix", xp: 100 },
+    { id: "report", type: "command", xp: 50, text: "Compare every round: lab report batch", match: { report: true } },
+  ],
+};
