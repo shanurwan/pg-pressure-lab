@@ -9,6 +9,12 @@
 //	READ_DATABASE_URL    optional pool for the read endpoints
 //	REPORT_DATABASE_URL  optional pool for /activity (a bulkhead)
 //	REQUEST_TIMEOUT      per-request deadline, default 2s
+//	ACQUIRE_TIMEOUT      give up waiting for a pool connection after this long
+//	                     and answer 503 pool_exhausted (default 0: wait for the
+//	                     whole request deadline)
+//	MIN_QUERY_BUDGET     do not start a query with less than this much of the
+//	                     request deadline left; answer 503 budget_exhausted
+//	                     (default 0: always start)
 package main
 
 import (
@@ -27,19 +33,21 @@ import (
 )
 
 type server struct {
-	write   *pgxpool.Pool
-	read    *pgxpool.Pool
-	report  *pgxpool.Pool
-	timeout time.Duration
+	write          *pgxpool.Pool
+	read           *pgxpool.Pool
+	report         *pgxpool.Pool
+	timeout        time.Duration
+	acquireTimeout time.Duration
+	minBudget      time.Duration
 }
 
 func main() {
 	ctx := context.Background()
-	timeout, err := time.ParseDuration(getenv("REQUEST_TIMEOUT", "2s"))
-	if err != nil {
-		log.Fatalf("REQUEST_TIMEOUT: %v", err)
+	s := &server{
+		timeout:        mustDuration("REQUEST_TIMEOUT", "2s"),
+		acquireTimeout: mustDuration("ACQUIRE_TIMEOUT", "0"),
+		minBudget:      mustDuration("MIN_QUERY_BUDGET", "0"),
 	}
-	s := &server{timeout: timeout}
 	s.write = mustPool(ctx, "DATABASE_URL", os.Getenv("DATABASE_URL"))
 	s.read = s.write
 	if u := os.Getenv("READ_DATABASE_URL"); u != "" {
@@ -60,7 +68,8 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	addr := getenv("LISTEN_ADDR", ":8080")
-	log.Printf("listening on %s, request timeout %s", addr, timeout)
+	log.Printf("listening on %s, request timeout %s, acquire timeout %s, min query budget %s",
+		addr, s.timeout, s.acquireTimeout, s.minBudget)
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
@@ -79,6 +88,40 @@ func mustPool(ctx context.Context, name, url string) *pgxpool.Pool {
 	}
 	log.Printf("%s: max %d connections", name, cfg.MaxConns)
 	return p
+}
+
+func mustDuration(name, def string) time.Duration {
+	d, err := time.ParseDuration(getenv(name, def))
+	if err != nil {
+		log.Fatalf("%s: %v", name, err)
+	}
+	return d
+}
+
+// withConn runs fn on a pooled connection, refusing early instead of starting
+// work that cannot finish in time. A request that waited most of its deadline
+// for a connection and then starts a query will almost certainly be cancelled
+// mid-query; that cancellation also costs the connection, so the next request
+// waits longer still. Failing fast keeps the pool doing useful work.
+func (s *server) withConn(ctx context.Context, p *pgxpool.Pool, fn func(*pgxpool.Conn) error) error {
+	actx := ctx
+	if s.acquireTimeout > 0 {
+		var cancel context.CancelFunc
+		actx, cancel = context.WithTimeout(ctx, s.acquireTimeout)
+		defer cancel()
+	}
+	c, err := p.Acquire(actx)
+	if err != nil {
+		if ctx.Err() == nil && actx.Err() != nil {
+			return &apiError{http.StatusServiceUnavailable, "pool_exhausted"}
+		}
+		return err
+	}
+	defer c.Release()
+	if dl, ok := ctx.Deadline(); ok && s.minBudget > 0 && time.Until(dl) < s.minBudget {
+		return &apiError{http.StatusServiceUnavailable, "budget_exhausted"}
+	}
+	return fn(c)
 }
 
 // apiError is an error with the HTTP status and a short machine-readable code
@@ -157,9 +200,11 @@ func (s *server) account(ctx context.Context, r *http.Request) (any, error) {
 		return nil, err
 	}
 	a := account{ID: id}
-	err = s.read.QueryRow(ctx,
-		`SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1`, id).
-		Scan(&a.Status, &a.Cash, &a.BuyingPower, &a.Equity)
+	err = s.withConn(ctx, s.read, func(c *pgxpool.Conn) error {
+		return c.QueryRow(ctx,
+			`SELECT status, cash, buying_power, equity FROM accounts WHERE id = $1`, id).
+			Scan(&a.Status, &a.Cash, &a.BuyingPower, &a.Equity)
+	})
 	return a, err
 }
 
@@ -174,9 +219,14 @@ func (s *server) positions(ctx context.Context, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, _ := s.read.Query(ctx,
-		`SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol`, id)
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[position])
+	var out []position
+	err = s.withConn(ctx, s.read, func(c *pgxpool.Conn) error {
+		rows, _ := c.Query(ctx,
+			`SELECT symbol, qty, avg_price FROM positions WHERE account_id = $1 ORDER BY symbol`, id)
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[position])
+		return err
+	})
+	return out, err
 }
 
 type order struct {
@@ -194,10 +244,15 @@ func (s *server) orders(ctx context.Context, r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, _ := s.read.Query(ctx,
-		`SELECT id, symbol, side, qty, coalesce(limit_price, 0), status, created_at
-		   FROM orders WHERE account_id = $1 ORDER BY created_at DESC LIMIT 20`, id)
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[order])
+	var out []order
+	err = s.withConn(ctx, s.read, func(c *pgxpool.Conn) error {
+		rows, _ := c.Query(ctx,
+			`SELECT id, symbol, side, qty, coalesce(limit_price, 0), status, created_at
+			   FROM orders WHERE account_id = $1 ORDER BY created_at DESC LIMIT 20`, id)
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[order])
+		return err
+	})
+	return out, err
 }
 
 type dayActivity struct {
@@ -210,11 +265,17 @@ type dayActivity struct {
 // orders.symbol, so every call scans the orders table. It stands in for the
 // report or admin query that is fine alone and harmful under load.
 func (s *server) activity(ctx context.Context, r *http.Request) (any, error) {
-	rows, _ := s.report.Query(ctx,
-		`SELECT date_trunc('day', created_at) AS day, count(*), coalesce(sum(qty), 0)
-		   FROM orders WHERE symbol = $1
-		  GROUP BY 1 ORDER BY 1 DESC LIMIT 30`, r.PathValue("symbol"))
-	return pgx.CollectRows(rows, pgx.RowToStructByPos[dayActivity])
+	var out []dayActivity
+	err := s.withConn(ctx, s.report, func(c *pgxpool.Conn) error {
+		rows, _ := c.Query(ctx,
+			`SELECT date_trunc('day', created_at) AS day, count(*), coalesce(sum(qty), 0)
+			   FROM orders WHERE symbol = $1
+			  GROUP BY 1 ORDER BY 1 DESC LIMIT 30`, r.PathValue("symbol"))
+		var err error
+		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[dayActivity])
+		return err
+	})
+	return out, err
 }
 
 type orderRequest struct {
@@ -239,33 +300,39 @@ func (s *server) placeOrder(ctx context.Context, r *http.Request) (any, error) {
 	}
 
 	var id int64
-	err := pgx.BeginFunc(ctx, s.write, func(tx pgx.Tx) error {
-		var bp float64
-		if err := tx.QueryRow(ctx,
-			`SELECT buying_power FROM accounts WHERE id = $1 AND status = 'ACTIVE' FOR UPDATE`,
-			req.AccountID).Scan(&bp); err != nil {
-			return err
-		}
-		cost := req.Qty * req.LimitPrice
-		if req.Side == "buy" {
-			if cost > bp {
-				return &apiError{http.StatusUnprocessableEntity, "insufficient_buying_power"}
-			}
-			if _, err := tx.Exec(ctx,
-				`UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1`,
-				req.AccountID, cost); err != nil {
-				return err
-			}
-		}
-		return tx.QueryRow(ctx,
-			`INSERT INTO orders (account_id, symbol, side, qty, limit_price, status)
-			 VALUES ($1, $2, $3, $4, $5, 'accepted') RETURNING id`,
-			req.AccountID, req.Symbol, req.Side, req.Qty, req.LimitPrice).Scan(&id)
+	err := s.withConn(ctx, s.write, func(c *pgxpool.Conn) error {
+		return pgx.BeginFunc(ctx, c, func(tx pgx.Tx) error {
+			return placeOrderTx(ctx, tx, req, &id)
+		})
 	})
 	if err != nil {
 		return nil, err
 	}
 	return map[string]int64{"id": id}, nil
+}
+
+func placeOrderTx(ctx context.Context, tx pgx.Tx, req orderRequest, id *int64) error {
+	var bp float64
+	if err := tx.QueryRow(ctx,
+		`SELECT buying_power FROM accounts WHERE id = $1 AND status = 'ACTIVE' FOR UPDATE`,
+		req.AccountID).Scan(&bp); err != nil {
+		return err
+	}
+	cost := req.Qty * req.LimitPrice
+	if req.Side == "buy" {
+		if cost > bp {
+			return &apiError{http.StatusUnprocessableEntity, "insufficient_buying_power"}
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE accounts SET buying_power = buying_power - $2, updated_at = now() WHERE id = $1`,
+			req.AccountID, cost); err != nil {
+			return err
+		}
+	}
+	return tx.QueryRow(ctx,
+		`INSERT INTO orders (account_id, symbol, side, qty, limit_price, status)
+		 VALUES ($1, $2, $3, $4, $5, 'accepted') RETURNING id`,
+		req.AccountID, req.Symbol, req.Side, req.Qty, req.LimitPrice).Scan(id)
 }
 
 type poolStats struct {

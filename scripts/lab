@@ -33,11 +33,17 @@ psql_admin() { "${DC[@]}" exec -T pg-primary psql -U postgres -d lab -v ON_ERROR
 round() {
   MIX='account=40,positions=25,orders=10,order=25'
   API_DATABASE_URL=$APP_URL API_READ_DATABASE_URL='' API_REPORT_DATABASE_URL='' API_REQUEST_TIMEOUT=2s
+  API_ACQUIRE_TIMEOUT=0 API_MIN_QUERY_BUDGET=0
   ROLE_SQL='' BATCH_ARGS=''
   case "$1/$2" in
     # Overnight batch against live traffic.
     batch/baseline)  ;;                                            # no batch: the reference
     batch/naive)     BATCH_ARGS="-mode naive -dsn $BATCH_SHARED" ;;  # one big transaction
+    # The same naive batch, but the API refuses work it cannot finish: it waits
+    # at most 250ms for a connection and starts no query with under 250ms left.
+    batch/naive-failfast)
+                     BATCH_ARGS="-mode naive -dsn $BATCH_SHARED"
+                     API_ACQUIRE_TIMEOUT=250ms API_MIN_QUERY_BUDGET=250ms ;;
     batch/chunked)   BATCH_ARGS="-mode chunked -dsn $BATCH_OWN -chunk 1000 -lock-timeout 100ms" ;;
     # A slow query that shares the pool with everything else.
     conn/baseline)   ;;
@@ -50,7 +56,8 @@ round() {
                      ROLE_SQL="ALTER ROLE report SET statement_timeout = '1s';" ;;
     *) echo "unknown round $1/$2 (see: scripts/lab rounds $1)" >&2; exit 2 ;;
   esac
-  export API_DATABASE_URL API_READ_DATABASE_URL API_REPORT_DATABASE_URL API_REQUEST_TIMEOUT
+  export API_DATABASE_URL API_READ_DATABASE_URL API_REPORT_DATABASE_URL API_REQUEST_TIMEOUT \
+    API_ACQUIRE_TIMEOUT API_MIN_QUERY_BUDGET
 }
 
 wait_api() {
@@ -80,6 +87,7 @@ cmd_run() {
 {"scenario":"$scenario","round":"$rnd","rate":$RATE,"duration":"$DURATION","batch_at_s":$BATCH_AT,
  "mix":"$MIX","batch_args":"${BATCH_ARGS//\"/\\\"}","role_sql":"${ROLE_SQL//\"/\\\"}",
  "api_report_pool":"${API_REPORT_DATABASE_URL:+separate}","api_request_timeout":"$API_REQUEST_TIMEOUT",
+ "api_acquire_timeout":"$API_ACQUIRE_TIMEOUT","api_min_query_budget":"$API_MIN_QUERY_BUDGET",
  "commit":"$(git rev-parse --short HEAD 2>/dev/null || echo none)","started_utc":"$stamp"}
 EOF
 
