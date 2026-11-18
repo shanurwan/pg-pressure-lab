@@ -4,27 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pg-pressure-lab · Real PostgreSQL incidents, replayed</title>
-<meta name="description" content="Interactive replays of recorded PostgreSQL incidents on a Go + PgBouncer + PostgreSQL stack, based on real public postmortems. See which signal moved first, measure every fix, and practise the interview questions.">
+<meta name="description" content="Interactive replays of recorded PostgreSQL incidents on a Go + PgBouncer + PostgreSQL stack, based on real public postmortems. See which signal moved first and measure every fix.">
 <meta property="og:title" content="pg-pressure-lab · Real PostgreSQL incidents, replayed">
-<meta property="og:description" content="Recorded runs of PostgreSQL failure modes from real postmortems: replay them in 3D, compare fixes, practise the interview questions.">
+<meta property="og:description" content="Recorded runs of PostgreSQL failure modes from real postmortems: replay them in 3D, see which signal moved first, and compare measured fixes.">
 <meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%230891b2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Crect x='8' y='9' width='16' height='14' rx='3' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=6d8e63f561">
+<link rel="stylesheet" href="styles.css?v=31b4bf3b91">
 <script>
   try { const t = localStorage.getItem("pgpl-theme"); if (t) document.documentElement.dataset.theme = JSON.parse(t); } catch {}
 </script>
 <script type="importmap">
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "./manifest.js": "./manifest.js?v=6d8e63f561",
-  "./data.js": "./data.js?v=6d8e63f561",
-  "./scene.js": "./scene.js?v=6d8e63f561",
-  "./chart.js": "./chart.js?v=6d8e63f561",
-  "./terminal.js": "./terminal.js?v=6d8e63f561"
+  "./manifest.js": "./manifest.js?v=31b4bf3b91",
+  "./data.js": "./data.js?v=31b4bf3b91",
+  "./scene.js": "./scene.js?v=31b4bf3b91",
+  "./chart.js": "./chart.js?v=31b4bf3b91",
+  "./terminal.js": "./terminal.js?v=31b4bf3b91"
 } }
 </script>
 </head>
@@ -36,7 +36,7 @@
     <a class="brand" href="./" data-nav="home"><span class="logo" aria-hidden="true"></span>pg-pressure-lab</a>
     <nav class="nav-links" id="nav-links" aria-label="Main">
       <a href="./#scenarios" data-nav="scenarios">Scenarios</a>
-      <a href="./?view=practice" data-nav="practice">Interview practice</a>
+      
       <a href="./#run" data-nav="run">Run it yourself</a>
     </nav>
     <div class="nav-right">
@@ -111,10 +111,10 @@
       <p><strong>Scope.</strong> Every run was recorded on a single host with PostgreSQL 17, PgBouncer 1.24 and a Go API using pgx. Numbers compare configurations run on the same machine; they are not a benchmark of PostgreSQL or of any company's systems. Incident summaries paraphrase the linked public postmortems.</p>
       <p>Code, raw results and how to reproduce every number: <a href="https://github.com/shanurwan/pg-pressure-lab">github.com/shanurwan/pg-pressure-lab</a> · Apache-2.0</p>
     </div>
-    <nav aria-label="Footer"><a href="./#scenarios">Scenarios</a><a href="./?view=practice">Interview practice</a><a href="./#run">Run it yourself</a></nav>
+    <nav aria-label="Footer"><a href="./#scenarios">Scenarios</a><a href="./#run">Run it yourself</a></nav>
   </div>
 </footer>
 
-<script type="module" src="app.js?v=6d8e63f561"></script>
+<script type="module" src="app.js?v=31b4bf3b91"></script>
 </body>
 </html>

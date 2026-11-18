@@ -1,7 +1,6 @@
 // pg-pressure-lab interactive replays. Static: replays recorded runs from
 // site/data, or (served by `scripts/lab live`) follows the run in progress
-// over /live/events. Views: home, a scenario (?scenario=), interview practice
-// (?view=practice).
+// over /live/events. Views: home and a scenario (?scenario=).
 import { SCENARIOS, SOURCES, STEPS, SIGNALS } from "./manifest.js";
 import { D, fmt, prep, totals, firstSignals, makeCtx, liveScenarios, store } from "./data.js";
 import { createScene } from "./scene.js";
@@ -215,10 +214,9 @@ function setNav(name) {
 async function render() {
   const p = params();
   const view = $("#view");
-  if (p.get("view") === "practice") { setNav("practice"); await renderPractice(view, p); }
-  else if (p.get("scenario")) { setNav(""); await renderScenario(view, p); }
+  if (p.get("scenario")) { setNav(""); await renderScenario(view, p); }
   else { setNav(""); await renderHome(view); }
-  document.title = p.get("scenario") ? `${SCENARIOS.find((s) => s.id === p.get("scenario"))?.short || "Scenario"} · pg-pressure-lab` : p.get("view") === "practice" ? "Interview practice · pg-pressure-lab" : "pg-pressure-lab · Real PostgreSQL incidents, replayed";
+  document.title = p.get("scenario") ? `${SCENARIOS.find((s) => s.id === p.get("scenario"))?.short || "Scenario"} · pg-pressure-lab` : "pg-pressure-lab · Real PostgreSQL incidents, replayed";
 }
 
 // ---------------- home ----------------
@@ -242,7 +240,7 @@ async function renderHome(view) {
         <p class="lede">Each scenario starts from a public postmortem, reproduces the failure on a real Go + PgBouncer + PostgreSQL stack under load, and measures every fix. Watch which signal moved first, then practise explaining it.</p>
         <div class="ctas">
           <a class="btn primary" href="?scenario=batch">Start with the batch outage <span aria-hidden="true">→</span></a>
-          <a class="btn" href="?view=practice">Interview practice</a>
+          <a class="btn" href="#run">Run it on your machine</a>
         </div>
         <div class="proof">
           <span><i class="dot ok"></i>${D.index.length} recorded runs</span>
@@ -269,76 +267,7 @@ async function renderHome(view) {
       <div class="features">
         <div class="feature"><div class="ic">01</div><h3>Reproduce</h3><p>Open-loop load keeps arriving whether or not the API keeps up, the way customers do. Every second of every run is recorded: callers, the app's pool, PgBouncer and PostgreSQL.</p></div>
         <div class="feature"><div class="ic">02</div><h3>Diagnose and fix</h3><p>Replay a run in 3D, on a timeline or from a terminal. Each fix is one change from the failing round, measured at least twice.</p></div>
-        <div class="feature"><div class="ic">03</div><h3>Practise</h3><p>Interview questions for every scenario, with a timer, model answers built from the measured numbers, and spaced repetition so you remember them.</p></div>
-      </div>
-    </div>
-  </section>
-
-  ${devSection()}`;
-  mountWorkspace($(".ws-slot", view));
-  runScope = "batch";
-  const id = params().get("run") || bestRun(batch, "naive");
-  if (!player.run || player.run.scenario !== "batch" || params().get("run")) {
-    const r = await player.loadRun(id, Number(params().get("at")) || 0);
-    const w = r.batch_window;
-    if (!params().get("at") && w) player.seek(Math.max(0, w.start_s - 4));
-  }
-  setTab("3d");
-  term?.setChips(["lab run batch naive", "lab run batch chunked", "lab report batch", "help"]);
-  if (!reduceMotion && !player.playing) { player.speed = 8; $("#ws-speed", ws).value = "10"; player.play(); }
-  wireCopy(view);
-}
-
-function card(sc) {
-  const ctx = makeCtx(sc, null);
-  const prim = primaryRound(sc);
-  const f = ctx.range(prim, "failed_pct", fmt.pct);
-  const done = (store.get("pgpl-steps", {})[sc.id] || []).length;
-  return `<article class="card link">
-    <div class="top"><span class="chip accent">${esc(sc.short)}</span>${f ? `<span class="chip bad">${f} failed</span>` : ""}<span class="chip">${sc.minutes} min</span></div>
-    <h3><a href="?scenario=${sc.id}">${esc(sc.title)}</a></h3>
-    <p class="desc">${esc(sc.summary)}</p>
-    <ul>${sc.practise.slice(0, 3).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
-    <div class="sources">${sc.sources.map((k) => SOURCES[k]).map((s) => `<a href="${s.url}" target="_blank" rel="noopener">${esc(s.org)} · ${esc(s.date)} <span aria-hidden="true">↗</span></a><p class="src-sum">${esc(s.title)}</p>`).join("")}</div>
-    <div class="foot"><span>${D.runsOf(sc.id).length} recorded runs</span><span class="progress"><span class="ring" style="--p:${Math.round((done / STEPS.length) * 100)}"></span>${done}/${STEPS.length}</span></div>
-  </article>`;
-}
-
-// ---------------- scenario ----------------
-async function renderScenario(view, p) {
-  const sc = SCENARIOS.find((s) => s.id === p.get("scenario"));
-  if (!sc || !D.runsOf(sc.id).length || !sc.ready) {
-    view.innerHTML = `<div class="wrap" style="padding:80px 0"><h1>Scenario not found</h1><p class="muted">It may not have recorded runs yet. <a href="./#scenarios">See all scenarios</a>.</p></div>`;
-    return;
-  }
-  const stepId = STEPS.some((s) => s.id === p.get("step")) ? p.get("step") : "incident";
-  const sig = await signalsFor(sc).catch(() => []);
-  const ctx = makeCtx(sc, sig);
-  const doneAll = store.get("pgpl-steps", {});
-  const done = new Set(doneAll[sc.id] || []);
-  done.add(stepId); doneAll[sc.id] = [...done]; store.set("pgpl-steps", doneAll);
-  const idx = STEPS.findIndex((s) => s.id === stepId);
-  const prev = STEPS[idx - 1], next = STEPS[idx + 1];
-  const prim = primaryRound(sc);
-
-  view.innerHTML = `
-  <div class="wrap">
-    <div class="crumbs"><a href="./#scenarios">Scenarios</a><span>/</span><span>${esc(sc.short)}</span></div>
-    <div class="sc-head">
-      <span class="eyebrow">${esc(sc.short)}</span>
-      <h1>${esc(sc.title)}</h1>
-      <p class="lede">${esc(sc.summary)}</p>
-      <div class="meta"><span class="chip">${sc.minutes} min</span><span class="chip">${D.runsOf(sc.id).length} recorded runs</span><span class="chip">${sc.sources.length} public ${sc.sources.length === 1 ? "incident" : "incidents"}</span>${ctx.range(prim, "failed_pct", fmt.pct) ? `<span class="chip bad">${ctx.range(prim, "failed_pct", fmt.pct)} failed in ${esc(prim)}</span>` : ""}</div>
-    </div>
-    <div class="sc-grid">
-      <nav class="rail" aria-label="Steps">${STEPS.map((s, i) => `<a href="?scenario=${sc.id}&step=${s.id}" ${s.id === stepId ? 'aria-current="step"' : ""} class="${done.has(s.id) && s.id !== stepId ? "done" : ""}"><span class="n">${done.has(s.id) && s.id !== stepId ? "✓" : i + 1}</span>${s.label}</a>`).join("")}</nav>
-      <article class="step-body">
-        <span class="eyebrow kicker">Step ${idx + 1} of ${STEPS.length}</span>
-        <h2>${STEPS[idx].label}</h2>
-        ${stepHtml(sc, stepId, ctx)}
-        <div class="step-nav">${prev ? `<a class="btn" href="?scenario=${sc.id}&step=${prev.id}">← ${prev.label}</a>` : "<span></span>"}${next ? `<a class="btn primary" href="?scenario=${sc.id}&step=${next.id}">${next.label} →</a>` : `<a class="btn primary" href="?view=practice&scenario=${sc.id}">Practise this scenario →</a>`}</div>
-      </article>
-      <div class="sc-work"><div class="ws-slot"></div></div>
+        <div class="feature"><div class="ic">03</div><h3>Alert earlier</h3><p>Every scenario ends with the signal that moved first, how many seconds before the first failed request, and the alert that would have caught it.</p></div>
     </div>
   </div>`;
   mountWorkspace($(".ws-slot", view));
@@ -353,7 +282,7 @@ async function renderScenario(view, p) {
   else if (stepId === "reproduce" && w) player.seek(Math.max(0, w.start_s - 5));
   else if (stepId === "diagnose" && w) player.seek(Math.min(player.run.maxT, Math.ceil(w.end_s) + 5));
   else if (w && player.t === 0) player.seek(Math.max(0, w.start_s - 3));
-  setTab(stepId === "drill" ? "terminal" : ["diagnose", "alert", "fix"].includes(stepId) ? "timeline" : "3d");
+  setTab(["diagnose", "alert", "fix"].includes(stepId) ? "timeline" : "3d");
   const rounds = [...new Set(D.runsOf(sc.id).map((r) => r.round))];
   term?.setChips([`lab run ${sc.id} ${prim}`, ...sc.fixes.filter((f) => rounds.includes(f)).slice(0, 2).map((f) => `lab run ${sc.id} ${f}`), `lab report ${sc.id}`]);
   if (stepId === "reproduce" && !reduceMotion) player.play();
@@ -364,7 +293,6 @@ async function renderScenario(view, p) {
     const bw = player.run.batch_window; if (bw) player.seek(Math.max(0, bw.start_s - 3));
     setTab("timeline");
   });
-  wirePracticeInline(view, sc, ctx);
 }
 
 function stepHtml(sc, step, ctx) {
@@ -372,12 +300,11 @@ function stepHtml(sc, step, ctx) {
     case "incident": return `${sc.incident(ctx)}
       <h3>The public record</h3><div class="src-cards">${sc.sources.map((k) => srcCard(SOURCES[k])).join("")}</div>
       ${sc.reading.length ? `<h3>Background reading</h3><div class="src-cards">${sc.reading.map((k) => srcCard(SOURCES[k])).join("")}</div>` : ""}
-      <h3>What you'll practise</h3><ul>${sc.practise.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
+      <h3>What you'll learn</h3><ul>${sc.practise.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`;
     case "reproduce": return sc.reproduce(ctx) + roundsNote(sc);
     case "diagnose": return sc.diagnose(ctx) + statementsTable(sc);
     case "fix": return sc.fix(ctx) + roundsTable(sc, ctx);
     case "alert": return sc.alert(ctx);
-    case "drill": return drillInline(sc);
     default: return "";
   }
 }
@@ -407,106 +334,6 @@ function roundsTable(sc, ctx) {
     const hiF = Math.max(...rs.filter((r) => r.round === round && r.rate === rate).map((r) => r.headline.failed_pct));
     return `<tr data-run="${bestRun(sc, round)}"><td><strong>${esc(round)}</strong> <span class="faint">· ${ctx.count(round)} ${ctx.count(round) === 1 ? "run" : "runs"}</span></td><td class="n ${hiF > 1 ? "v-bad" : "v-ok"}">${f ?? "–"}</td><td class="n">${ctx.range(round, "failed_after_batch", fmt.n) ?? "–"}</td><td>${rec(round)}</td></tr>`;
   }).join("")}</tbody></table></div><p class="faint" style="font-size:13px">Ranges cover every recorded run of a round; round descriptions are in the Terminal (<code>lab rounds ${esc(sc.id)}</code>). Click a row to replay it.</p>`;
-}
-
-// ---------------- interview practice ----------------
-const SRS_KEY = "pgpl-srs";
-const qid = (sc, i) => `${sc.id}:${i}`;
-function srs() { return store.get(SRS_KEY, {}); }
-function progressOf(sc) {
-  const s = srs(); const n = sc.interview.length; if (!n) return 0;
-  return sc.interview.filter((_, i) => s[qid(sc, i)] && s[qid(sc, i)].last !== "again").length / n;
-}
-function nextQuestion(sc) {
-  const s = srs();
-  return sc.interview.map((_, i) => ({ i, due: s[qid(sc, i)]?.due ?? 0 })).sort((a, b) => a.due - b.due || a.i - b.i)[0]?.i ?? 0;
-}
-function drillInline(sc) {
-  if (!sc.interview.length) return "<p>No questions yet for this scenario.</p>";
-  return `<p>The question an interviewer is most likely to ask about this scenario. Answer it in your own words before you look.</p><div id="inline-q"></div><p style="margin-top:16px"><a class="btn" href="?view=practice&scenario=${sc.id}">All ${sc.interview.length} questions, with spaced repetition →</a></p>`;
-}
-function wirePracticeInline(view, sc, ctx) {
-  const slot = $("#inline-q", view);
-  if (slot) mountQuestion(slot, sc, ctx, nextQuestion(sc), { inline: true });
-  const st = $("#stmts", view);
-  if (st) D.load(st.dataset.run).then((r) => {
-    const rows = (r.top_statements || []).slice(0, 6);
-    st.innerHTML = rows.length ? `<div class="tablewrap"><table class="data"><thead><tr><th>Statement</th><th class="n">Calls</th><th class="n">Total</th><th class="n">Max</th></tr></thead><tbody>${rows.map((s) => `<tr><td><code style="font-size:12px;white-space:normal">${esc(s.query.slice(0, 110))}${s.query.length > 110 ? "…" : ""}</code></td><td class="n">${fmt.n(s.calls)}</td><td class="n">${fmt.ms(s.total_ms)}</td><td class="n">${fmt.ms(s.max_ms)}</td></tr>`).join("")}</tbody></table></div><p class="faint" style="font-size:13px">From pg_stat_statements for run ${esc(r.stamp)}.</p>` : "<p class='faint'>No statements recorded for this run.</p>";
-  });
-}
-
-let timerHandle = null;
-function mountQuestion(slot, sc, ctx, i, { inline = false } = {}) {
-  const q = sc.interview[i];
-  const draftKey = `pgpl-draft-${qid(sc, i)}`;
-  const limit = 150;
-  slot.innerHTML = `<div class="qcard">
-    <div class="qh"><div class="row"><span class="chip accent">${esc(sc.short)} · Q${i + 1} of ${sc.interview.length}</span><span class="timer" id="timer"><span class="bar"><i></i></span><span class="tv">2:30</span></span></div>
-      <p class="q">${esc(q.q)}</p></div>
-    <div class="qb">
-      <label class="sr" for="ans">Your answer</label>
-      <textarea id="ans" placeholder="Answer out loud or type it: what you'd look at first, how you'd stop the bleeding, the root cause, and what you'd change.">${esc(store.get(draftKey, ""))}</textarea>
-      <div class="actions"><button class="btn primary" id="reveal" type="button">Reveal model answer</button>${inline ? "" : '<button class="btn ghost" id="skip" type="button">Skip</button>'}<span class="faint" style="font-size:13px;margin-left:auto">Your draft is saved in this browser.</span></div>
-      <div id="model" hidden></div>
-    </div></div>`;
-  const ta = $("#ans", slot);
-  ta.addEventListener("input", () => store.set(draftKey, ta.value));
-  clearInterval(timerHandle);
-  let left = limit; const tv = $(".tv", slot), bar = $(".bar i", slot), tm = $("#timer", slot);
-  const draw = () => { const m = Math.floor(Math.abs(left) / 60), s = String(Math.abs(left) % 60).padStart(2, "0"); tv.textContent = left >= 0 ? `${m}:${s}` : `+${m}:${s} over`; bar.style.width = `${Math.min(100, ((limit - left) / limit) * 100)}%`; tm.classList.toggle("over", left < 0); };
-  draw(); timerHandle = setInterval(() => { left--; draw(); if (!slot.isConnected) clearInterval(timerHandle); }, 1000);
-  $("#reveal", slot).addEventListener("click", () => {
-    clearInterval(timerHandle);
-    const a = q.a(ctx);
-    const part = (k, label, dot) => `<div class="part"><h4><i class="dot ${dot}"></i>${label}</h4><ul>${(a[k] || []).map((x) => `<li>${x}</li>`).join("")}</ul></div>`;
-    const m = $("#model", slot);
-    m.innerHTML = `<div class="answer">${part("detect", "Detect", "wait")}${part("mitigate", "Mitigate", "shed")}${part("root", "Root cause", "bad")}${part("prevent", "Prevent", "ok")}</div>
-      ${q.followups?.length ? `<div class="followups"><h4>Likely follow-ups</h4><ul>${q.followups.map((f) => `<li>${esc(f)}</li>`).join("")}</ul></div>` : ""}
-      <div class="grade"><span class="muted" style="font-size:14px">How did you do?</span><button class="btn sm" data-g="again" type="button">Again</button><button class="btn sm" data-g="good" type="button">Good</button><button class="btn sm" data-g="easy" type="button">Easy</button><span class="faint" id="graded" style="font-size:13px"></span></div>`;
-    m.hidden = false;
-    $("#reveal", slot).hidden = true;
-    for (const b of $$("[data-g]", m)) b.addEventListener("click", () => {
-      const s = srs(); const cur = s[qid(sc, i)] || { interval: 0, reps: 0 };
-      const g = b.dataset.g; const day = 86400000;
-      cur.interval = g === "again" ? 0 : g === "good" ? Math.max(1, cur.interval * 2 || 1) : Math.max(3, cur.interval * 3 || 3);
-      cur.due = Date.now() + (g === "again" ? 60000 : cur.interval * day); cur.reps++; cur.last = g;
-      s[qid(sc, i)] = cur; store.set(SRS_KEY, s);
-      $("#graded", m).textContent = g === "again" ? "We'll ask again in a minute." : `Next review in ${cur.interval} day${cur.interval === 1 ? "" : "s"}.`;
-      if (!inline) setTimeout(() => go(`?view=practice&scenario=${sc.id}`), 700);
-      updateRings();
-    });
-  });
-  $("#skip", slot)?.addEventListener("click", () => {
-    const n = (i + 1) % sc.interview.length; mountQuestion(slot, sc, ctx, n);
-  });
-}
-function updateRings() { for (const el of $$("[data-ring]")) { const sc = SCENARIOS.find((s) => s.id === el.dataset.ring); el.style.setProperty("--p", Math.round(progressOf(sc) * 100)); } }
-
-async function renderPractice(view, p) {
-  const scs = liveScenarios().filter((s) => s.interview.length);
-  const sc = scs.find((s) => s.id === p.get("scenario")) || scs[0];
-  if (!sc) { view.innerHTML = `<div class="wrap" style="padding:80px 0"><h1>No questions yet</h1></div>`; return; }
-  const ctx = makeCtx(sc, await signalsFor(sc).catch(() => []));
-  const star = sc.star(ctx);
-  view.innerHTML = `<div class="wrap">
-    <div class="sc-head" style="padding-top:36px">
-      <span class="eyebrow">Interview practice</span>
-      <h1>Explain it like you've debugged it</h1>
-      <p class="lede">Questions an SRE or database interview loop asks about these failures. Answer against the clock, compare with a model answer built from the measured runs, and grade yourself: questions you miss come back sooner.</p>
-    </div>
-    <div class="prac-grid">
-      <aside class="prac-side">${scs.map((s) => `<button class="prac-sc" type="button" data-sc="${s.id}" aria-pressed="${s.id === sc.id}"><span class="ring" data-ring="${s.id}" style="--p:${Math.round(progressOf(s) * 100)}"></span><span><strong style="font-size:14px">${esc(s.short)}</strong><small>${s.interview.length} questions</small></span></button>`).join("")}
-        <a class="btn" href="?scenario=${sc.id}" style="justify-content:center">Open the ${esc(sc.short.toLowerCase())} replay</a>
-      </aside>
-      <div>
-        <div id="q-slot"></div>
-        <div class="card star"><h3>Your story for this scenario <span class="chip" style="margin-left:6px">STAR</span></h3><p class="faint" style="font-size:13px;margin:6px 0 0">Adapt it, and say plainly that this was a lab you built and measured, not a production incident you were paged for.</p>
-          <dl>${Object.entries(star).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>
-      </div>
-    </div></div>`;
-  for (const b of $$(".prac-sc", view)) b.addEventListener("click", () => go(`?view=practice&scenario=${b.dataset.sc}`));
-  const qi = p.has("q") ? Math.min(sc.interview.length - 1, Math.max(0, Number(p.get("q")) - 1)) : nextQuestion(sc);
-  mountQuestion($("#q-slot", view), sc, ctx, qi);
 }
 
 // ---------------- developers ----------------

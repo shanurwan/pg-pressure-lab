@@ -119,64 +119,6 @@ export const SCENARIOS = [
     alert(ctx) {
       return `<p>A caller only sees trouble once a request fails. The question is which signal moved before that, on every run, by enough to page someone.</p>${ctx.signalsSentence()}`;
     },
-    interview: [
-      {
-        q: "An overnight batch job finished, but the API kept failing for minutes afterwards. Walk me through how you'd diagnose it and what you'd change.",
-        a(ctx) {
-          return {
-            detect: [ctx.sigLead("longest_xact_s", "Page on the age of the oldest open transaction"), "Error-rate SLO burn on every endpoint, not just writes: the blast radius is the pool, not the table.", "PgBouncer cl_waiting and the app pool's wait count rising together."].filter(Boolean),
-            mitigate: ["Stop the trigger: find the job's backend in pg_stat_activity (oldest xact_start) and cancel or terminate it.", ctx.range("naive-failfast", "failed_pct", ctx.fmt.pct) && `Shed load fast instead of queueing: bounding the pool wait recovered within ${ctx.range("naive-failfast", "recovered_s", ctx.fmt.s)} in the lab.`, "If it still doesn't recover once the job is gone, the loop is self-sustaining: reduce in-flight requests or restart the callers to clear the queue."].filter(Boolean),
-            root: [`One transaction locked every account row; order requests waited on those locks while holding pool connections, so reads failed too (${ctx.range("naive", "failed_pct", ctx.fmt.pct)} of all requests).`, `After it committed, cancellations kept closing connections (pgx default) and PgBouncer kept rebuilding them${ctx.range("naive", "max_sessions_per_s", ctx.fmt.n) ? ` (${ctx.range("naive", "max_sessions_per_s", ctx.fmt.n)} new sessions/s)` : ""}: a metastable state.`],
-            prevent: [ctx.range("chunked", "failed_pct", ctx.fmt.pct) && `Chunk the job: short transactions, lock_timeout, its own small pool (${ctx.range("chunked", "failed_pct", ctx.fmt.pct)} failed).`, ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct) && `CancelRequestContextWatcherHandler in pgx (${ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct)} failed with the job unchanged).`, "Alert on transaction age; review batch jobs like schema changes."].filter(Boolean),
-          };
-        },
-        followups: ["Why did reads fail when the job only locked account rows?", "Why did halving the traffic not help?", "What does lock_timeout cost the batch job, and is that acceptable?", "How would you prove the fix in production without waiting for the next bad night?"],
-      },
-      {
-        q: "What would you alert on for this failure, and how much warning would it give you?",
-        a(ctx) {
-          return {
-            detect: [ctx.sigLead("longest_xact_s", "Oldest open transaction age"), ctx.sigLead("pg_lock_wait", "Lock waiters"), ctx.sigLead("bouncer_cl_waiting", "PgBouncer clients waiting")].filter(Boolean),
-            mitigate: ["Alert routes to the on-call with the job's pid and xact_start in the payload, so the first action is obvious."],
-            root: ["Lock waits are a symptom that appears once callers are already queued; the long transaction is the cause and is visible from its first second."],
-            prevent: ["A per-role max transaction age (batch role vs app role) instead of one global threshold.", "Error-budget burn-rate alerts as the user-facing backstop."],
-          };
-        },
-        followups: ["What threshold would you pick, and how would you avoid paging on every legitimate long report?", "Which of these signals would you put on the service dashboard vs the database dashboard?"],
-      },
-      {
-        q: "Your Go service uses pgx behind PgBouncer. What happens when a request's context is cancelled mid-query, and what would you change?",
-        a(ctx) {
-          return {
-            detect: ["New sessions per second on PostgreSQL and PgBouncer 'client disconnect while server was not ready' in the logs are the fingerprint of cancellation churn."],
-            mitigate: ["Bound the time spent waiting for a pool connection separately from the query budget, and refuse work that cannot finish."],
-            root: ["The default DeadlineContextWatcherHandler sets an immediate deadline on the socket; the read fails, pgx closes the connection and the pool destroys it. Behind PgBouncer the server connection goes too."],
-            prevent: [ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct) && `Use CancelRequestContextWatcherHandler so a cancelled query is cancelled on the server and the connection survives: in the lab the same incident went to ${ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct)} failed.`, "Load-test with deadlines and a lock storm, not just throughput."].filter(Boolean),
-          };
-        },
-        followups: ["What's the risk of the cancel-request approach if the server never acknowledges the cancel?", "How does transaction pooling change what a session-level setting means?"],
-      },
-      {
-        q: "How would you run an end-of-day job against a live trading database safely?",
-        a(ctx) {
-          return {
-            detect: ["Instrument the job: chunk duration, lock-timeout retries, rows per second; alert if it stops making progress."],
-            mitigate: ["A kill switch and a resumable checkpoint, so stopping it is cheap."],
-            root: ["Long transactions hold locks and the xmin horizon; one big transaction is atomic but is also the largest possible blast radius."],
-            prevent: [`Small transactions keyed by id range, lock_timeout so the job yields to live traffic, its own pool so it can't take the API's connections${ctx.range("chunked", "batch_seconds", ctx.fmt.s) ? ` (the job went to ${ctx.range("chunked", "batch_seconds", ctx.fmt.s)}, with 0 failed requests)` : ""}.`, "Separate heavy read-only rollups from the locking writes; consider a replica for the reads (not measured here)."],
-          };
-        },
-        followups: ["How do you keep the result consistent if the job is now many transactions?", "When is one big transaction the right answer?"],
-      },
-    ],
-    star(ctx) {
-      return {
-        Situation: `In a lab I built: a Go API on pgx → PgBouncer → PostgreSQL 17 under ${ctx.fmt.n(ctx.rate)} req/s of open-loop load, with an end-of-day job written as one transaction.`,
-        Task: "Find out why the API stayed down after the job ended, and which fix to ship.",
-        Action: "Recorded pg_stat_activity, PgBouncer pools and app pool waits every second; read the pgx source to confirm why cancellations closed connections; measured three fixes, one change at a time, at least twice each.",
-        Result: [ctx.range("naive", "failed_pct", ctx.fmt.pct) && `The naive job failed ${ctx.range("naive", "failed_pct", ctx.fmt.pct)} of requests and never recovered`, ctx.range("chunked", "failed_pct", ctx.fmt.pct) && `chunking reached ${ctx.range("chunked", "failed_pct", ctx.fmt.pct)}`, ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct) && `one pgx setting brought it to ${ctx.range("naive-cancelreq", "failed_pct", ctx.fmt.pct)}`].filter(Boolean).join("; ") + ".",
-      };
-    },
   },
 
   {
@@ -207,35 +149,6 @@ export const SCENARIOS = [
       return `<ul>${[lt && `<li><strong>lock_timeout + retry:</strong> ${lt} failed.</li>`, ip && ic && `<li><strong>CREATE INDEX CONCURRENTLY</strong> instead of a plain build: ${ic} failed, against ${ip}.</li>`].filter(Boolean).join("")}</ul>`;
     },
     alert(ctx) { return `<p>Watch for DDL waiting on a lock and for any transaction older than your migration budget before you start one.</p>${ctx.signalsSentence()}`; },
-    interview: [
-      {
-        q: "How do you add a column and an index to a 1-billion-row table on a live database without downtime?",
-        a(ctx) {
-          return {
-            detect: ["Before starting: check for long transactions and pending locks on the table; during: watch lock waiters and the age of the DDL's wait."],
-            mitigate: ["If the DDL is queued and traffic is piling up behind it, cancel the DDL first: it is the one blocking everyone."],
-            root: ["ALTER TABLE needs ACCESS EXCLUSIVE briefly; while it waits it blocks every later query. A plain CREATE INDEX blocks writes for the whole build."],
-            prevent: ["SET lock_timeout (a few seconds) and retry with backoff.", "CREATE INDEX CONCURRENTLY (and check for INVALID indexes if it fails).", "Add constraints NOT VALID, then VALIDATE separately; add NOT NULL via a validated CHECK first.", ctx.range("alter-locktimeout", "failed_pct", ctx.fmt.pct) && `In the lab, lock_timeout + retry brought the ALTER round to ${ctx.range("alter-locktimeout", "failed_pct", ctx.fmt.pct)} failed.`].filter(Boolean),
-          };
-        },
-        followups: ["What happens if CREATE INDEX CONCURRENTLY fails halfway?", "Why can a metadata-only ALTER still cause an outage?", "How do you make migrations safe by default for every team?"],
-      },
-      {
-        q: "Requests on one table are all timing out, but CPU and I/O look normal. What do you check?",
-        a() {
-          return {
-            detect: ["pg_stat_activity wait_event_type = 'Lock'; pg_blocking_pids() to find the head of the chain; pg_locks for the lock modes."],
-            mitigate: ["Cancel the head of the chain if it is a migration or an idle-in-transaction session; otherwise wait or shed load."],
-            root: ["Lock queues are FIFO: one waiting strong lock blocks weaker requests behind it."],
-            prevent: ["lock_timeout on DDL, statement_timeout and idle_in_transaction_session_timeout on application roles."],
-          };
-        },
-        followups: ["What's the difference between lock_timeout and statement_timeout?"],
-      },
-    ],
-    star() {
-      return { Situation: "Lab: a migration on a hot table under live load.", Task: "Show why a fast ALTER can cause an outage and make it safe.", Action: "Reproduced the lock queue, then lock_timeout + retry, and CONCURRENTLY for the index; measured each.", Result: "See the rounds table for the measured difference." };
-    },
   },
 
   {
@@ -263,21 +176,6 @@ export const SCENARIOS = [
       return `<ul>${[b && `<li><strong>Backoff + retry budget:</strong> ${b} failed.</li>`, n && `<li><strong>No retries:</strong> ${n} failed.</li>`].filter(Boolean).join("")}</ul>`;
     },
     alert(ctx) { return `<p>Track the ratio of retried to original requests at the client and at the edge.</p>${ctx.signalsSentence()}`; },
-    interview: [
-      {
-        q: "What's a metastable failure, and how would you design clients so they can't cause one?",
-        a() {
-          return {
-            detect: ["The trigger is gone but error rate stays high; offered load is far above organic load; retry ratio climbing."],
-            mitigate: ["Cut the sustaining effect: disable retries, shed load at the edge, or drain queues; capacity alone often doesn't help."],
-            root: ["A trigger pushes the system past a point where the extra work it causes (retries, reconnects, cancelled work) keeps it overloaded."],
-            prevent: ["Retry budgets (e.g. retries ≤ 10% of requests), jittered exponential backoff, deadlines propagated end to end, and admission control."],
-          };
-        },
-        followups: ["Why does adding capacity sometimes not fix it?", "Where should the retry budget live: client, gateway, or both?"],
-      },
-    ],
-    star() { return { Situation: "Lab: a short database stall under client retries.", Task: "Show how retries change recovery.", Action: "Ran the same trigger with three client policies.", Result: "See the rounds table." }; },
   },
 
   {
@@ -302,21 +200,6 @@ export const SCENARIOS = [
     diagnose() { return "<p>Look for the oldest <code>backend_xmin</code> in pg_stat_activity, replication slots and prepared transactions; compare dead tuples on the hot table to live ones.</p>"; },
     fix(ctx) { const t = ctx.range("idle-tx-timeout", "read_p99_ms", ctx.fmt.ms); return t ? `<p>With the timeout, read p99 was <strong>${t}</strong>.</p>` : "<p>See the rounds table.</p>"; },
     alert(ctx) { return `<p>Alert on the age of the oldest xmin and on dead tuples on the tables you care about.</p>${ctx.signalsSentence()}`; },
-    interview: [
-      {
-        q: "A table that should be small keeps growing and queries on it get slower, but vacuum is running. What's going on?",
-        a() {
-          return {
-            detect: ["n_dead_tup growing on the table; autovacuum logs 'dead row versions cannot be removed yet'; an old backend_xmin, replication slot or prepared transaction."],
-            mitigate: ["Terminate the session holding the horizon (or drop the stale slot), then let vacuum catch up."],
-            root: ["MVCC keeps old row versions until no transaction can see them; one old snapshot keeps every newer dead row alive."],
-            prevent: ["idle_in_transaction_session_timeout for app roles, alerts on xmin age, monitoring of replication slots, and of age(datfrozenxid) for wraparound."],
-          };
-        },
-        followups: ["How does this connect to transaction ID wraparound?", "Why does a replica with hot_standby_feedback matter here?"],
-      },
-    ],
-    star() { return { Situation: "Lab: a hot table plus one idle transaction.", Task: "Show the cost and the fix.", Action: "Measured dead tuples and read latency with and without the timeout.", Result: "See the rounds table." }; },
   },
 
   {
@@ -332,21 +215,6 @@ export const SCENARIOS = [
     diagnose() { return "<p>The error is <code>integer out of range</code> on insert. The fix is not the sequence, it's the column type of everything that stores the id.</p>"; },
     fix() { return "<p>Convert referencing columns to bigint ahead of time (online, with a new column and backfill), or as an emergency workaround, move the sequence to negative values.</p>"; },
     alert(ctx) { return `<p>Alert at a fraction of the int4 range used, for every int4 column that stores an id.</p>${ctx.signalsSentence()}`; },
-    interview: [
-      {
-        q: "How would you find and fix an id column that's about to overflow, before it does?",
-        a() {
-          return {
-            detect: ["Query sequences and columns: last_value vs the column's type maximum; alert at, say, 50% and 75%."],
-            mitigate: ["Emergency: restart the sequence in the negative range to buy time."],
-            root: ["The key was bigint but a referencing column wasn't; overflow happens on the narrowest column that stores the value."],
-            prevent: ["bigint for all ids by default; schema linting; a backfill-based online type change well before the cliff."],
-          };
-        },
-        followups: ["Why is ALTER COLUMN TYPE bigint dangerous on a big table, and how do you do it online?"],
-      },
-    ],
-    star() { return { Situation: "Lab: an int4 reference to a bigint key.", Task: "Reproduce and detect the overflow early.", Action: "Ran writes across the limit and measured when an alert would fire.", Result: "See the rounds table." }; },
   },
 
   {
@@ -362,21 +230,6 @@ export const SCENARIOS = [
     diagnose() { return "<p>Lock waits on a single tuple: <code>pg_locks</code> with locktype = 'tuple' or transactionid, many waiters, one holder at a time.</p>"; },
     fix() { return "<p>Stop updating the row: write an append-only ledger and aggregate, or shard the counter.</p>"; },
     alert(ctx) { return `<p>Lock waiters concentrated on one relation and one row.</p>${ctx.signalsSentence()}`; },
-    interview: [
-      {
-        q: "Order throughput collapsed for one big customer account but not for others. What do you suspect and how do you fix it?",
-        a() {
-          return {
-            detect: ["Lock waits concentrated on one row; p99 for that account only."],
-            mitigate: ["Rate-limit that account's writers; move its work to a queue processed serially."],
-            root: ["Every order updates the same balance row, so writes serialise on its lock."],
-            prevent: ["Append-only ledger with periodic aggregation, sharded counters, or SELECT … FOR UPDATE SKIP LOCKED work queues."],
-          };
-        },
-        followups: ["How do you keep a balance correct if it's computed from a ledger?"],
-      },
-    ],
-    star() { return { Situation: "Lab: an omnibus account row under concurrent orders.", Task: "Show the contention and a design fix.", Action: "Measured the hot round against alternatives.", Result: "See the rounds table." }; },
   },
 
   {
@@ -395,7 +248,6 @@ export const SCENARIOS = [
     incident() { return "<p>Order timeouts from database connection pressure (Alpaca, 27 June 2026) and connection slots exhausted by long-running work (Railway, October 2025).</p>"; },
     reproduce() { return "<p>See the rounds.</p>"; }, diagnose() { return ""; }, fix() { return ""; },
     alert(ctx) { return ctx.signalsSentence(); },
-    interview: [], star() { return { Situation: "", Task: "", Action: "", Result: "" }; },
   },
 ];
 
@@ -405,5 +257,4 @@ export const STEPS = [
   { id: "diagnose", label: "Diagnose" },
   { id: "fix", label: "Fix" },
   { id: "alert", label: "What to alert on" },
-  { id: "drill", label: "Interview drill" },
 ];
