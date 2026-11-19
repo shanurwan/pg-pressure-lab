@@ -19,7 +19,7 @@ Every number below comes from `results/`, at 300 requests a second for 180 s wit
 
 ### Batch job against live traffic
 
-Modelled on Alpaca's [28 Aug 2026 incident](https://stspg.io/tdl12cgrzvrm), where an overnight batch with higher volume took capacity from the Broker API.
+Modelled on Railway's [28 Oct 2025 incident](https://blog.railway.com/p/incident-report-oct-28th-2025), where a long lock-holding operation piled up connections until every slot was taken, and the [AWS us-east-1 outage of 7 Dec 2021](https://aws.amazon.com/message/12721/), where the failure outlived its trigger. Alpaca's [28 Aug 2026 status note](https://stspg.io/tdl12cgrzvrm) describes a similar night: an overnight batch with more data than usual that reduced capacity for its API.
 
 - **One long transaction takes down every endpoint, not just the ones it locks.** The naive batch locks account rows; order requests wait on those locks while holding pool connections, the pool empties, and reads fail too. 53 to 66% of all requests failed.
 - **It does not come back when the batch ends.** In every naive run the API was still failing when the run ended, 21,600 to 30,000 requests after the batch had committed. A request waits almost its whole 2 s budget for a connection, starts a query with milliseconds left and is cancelled; pgx closes a connection whose query is cancelled (its default `DeadlineContextWatcherHandler`), so PgBouncer drops its server connection too (`client disconnect while server was not ready`) and PostgreSQL starts a new session: 112 to 121 new sessions a second, against 0 to 8 when healthy. The trigger is gone and the failure sustains itself, a [metastable failure](https://sigops.org/s/conferences/hotos/2021/papers/hotos21-s11-bronson.pdf).
@@ -135,7 +135,7 @@ Modelled on Heroku's [table-locking UPDATE](https://www.heroku.com/blog/curious-
 
 ### One slow query in a shared pool
 
-Modelled on Alpaca's [27 Jun 2026 incident](https://stspg.io/h6zvs1kdv87n), order timeouts from database connection pressure.
+Modelled on Railway's [28 Oct 2025 incident](https://blog.railway.com/p/incident-report-oct-28th-2025), where long-running work took connection slots until nothing else could get one. Alpaca's [27 Jun 2026 incident](https://stspg.io/h6zvs1kdv87n) attributes order timeouts to database connection pressure.
 
 - **Three slow reports in a hundred requests slow everything else down.** Sharing the pool, the order and read p99 rose from about 95 and 42 ms to 950 to 1,230 ms.
 - **A bulkhead gives the other endpoints their latency back:** with reports on their own three connections, order p99 was 122 to 133 ms and reads 52 to 65 ms. The price is paid by the reports, which now queue among themselves: 2.2% of all requests failed, all of them reports, against 1.0 to 1.2% when shared.

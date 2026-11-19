@@ -77,7 +77,7 @@ export const SCENARIOS = [
     title: "The batch job finished. The outage didn't.",
     short: "Overnight batch vs live traffic",
     summary: "One end-of-day transaction locks every account while orders keep arriving. The pool drains, reads fail with it, and the API stays down after the job commits.",
-    sources: ["alpaca28aug", "alpaca27jun", "aws2021"], reading: ["bronson"],
+    sources: ["railway", "aws2021", "alpaca28aug"], reading: ["bronson"],
     practise: ["Read a lock-driven outage from pg_stat_activity and PgBouncer", "Explain what keeps a metastable failure going", "Compare three fixes by measured impact", "Pick alerts that fire before users notice"],
     rounds: {
       baseline: "No job. The reference: the same traffic with nothing else running.",
@@ -87,7 +87,7 @@ export const SCENARIOS = [
       "naive-failfast": "Fix: the same naive job. The API waits at most 250 ms for a connection and starts no query with less than 250 ms of its deadline left.",
     },
     incident(ctx) {
-      return `<p>Alpaca's public status page describes two nights this year that this scenario is built around: an overnight batch with more data than usual that <strong>reduced capacity for the API</strong>, and order timeouts from <strong>database connection pressure</strong>. Their notes don't describe their internals, so this lab does not try to; it reproduces the <em>class</em> of failure on its own stack and measures it.</p>
+      return `<p>A long-running job and live traffic share one database. The job holds row locks for its whole transaction; requests that need those rows wait while holding connections, the pool runs dry, and endpoints that never touch the locked rows start failing too. Railway's October 2025 incident is the pattern at scale: a migration locked a table of about a billion rows and connections piled up until every slot was taken, degrading the API for about 40 minutes. It gets worse when the failure outlives its trigger: in AWS's December 2021 us-east-1 event, clients that kept retrying held network devices overloaded long after the original cause, a <strong>metastable failure</strong>. Alpaca's status page, linked below, describes a similar night: an overnight batch with more data than usual that reduced capacity for its API. This lab does not model anyone's internals; it reproduces the <em>class</em> of failure on its own stack and measures it.</p>
       <p>The stack: a Go API (pgx pool of 40) → PgBouncer in transaction mode (20 server connections) → PostgreSQL 17 with 200,000 accounts, 2 million positions and 20 million orders, under a steady ${ctx.fmt.n(ctx.rate)} requests a second that keep arriving whether or not the API keeps up.</p>`;
     },
     reproduce(ctx) {
